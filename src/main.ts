@@ -1,5 +1,6 @@
 import "./styles/main.css";
 
+import { isSupportedBookFile, SUPPORTED_BOOK_ACCEPT } from "./import/parse-book";
 import { getSettings, getSettingsSync } from "./store/settings";
 import { themeNames } from "./themes";
 import { clear, el } from "./ui/dom";
@@ -40,7 +41,7 @@ const fileInput = el("input", {
   className: "visually-hidden",
   attrs: {
     type: "file",
-    accept: ".epub,application/epub+zip",
+    accept: SUPPORTED_BOOK_ACCEPT,
     hidden: true,
     tabindex: "-1",
     "aria-hidden": "true",
@@ -123,13 +124,12 @@ let stopRouting: (() => void) | undefined;
 let bootGeneration = 0;
 let palette: ModalHandle | undefined;
 
-function isEpub(file: File): boolean {
-  return file.name.toLowerCase().endsWith(".epub") || file.type === "application/epub+zip";
-}
-
 function importFile(file: File): void {
-  if (!isEpub(file)) {
-    showToast("Please choose an EPUB file.", "warning");
+  if (!isSupportedBookFile(file)) {
+    showToast(
+      "Unsupported file. Use .epub, .pdf, .txt, .md, .markdown, .html, or .htm.",
+      "warning"
+    );
     return;
   }
   closePalette();
@@ -162,10 +162,10 @@ function commandCatalog(): Command[] {
     },
     {
       id: "import",
-      label: "Import an EPUB",
+      label: "Add book",
       hint: "local file",
       icon: "upload",
-      keywords: "add open book file",
+      keywords: "import add open book file epub pdf txt markdown html",
       run: () => fileInput.click(),
     },
     {
@@ -351,7 +351,7 @@ function showDropOverlay(): void {
     "div",
     { className: "drop-overlay", attrs: { role: "status", "aria-live": "polite" } },
     iconSpan("upload"),
-    "drop your EPUB to import"
+    "drop a book to import"
   );
   document.body.appendChild(dropOverlay);
 }
@@ -383,9 +383,14 @@ window.addEventListener("drop", (event) => {
   if (files.length === 0) return;
   event.preventDefault();
   hideDropOverlay();
-  const epub = files.find(isEpub);
-  if (epub) importFile(epub);
-  else showToast("Drop an .epub file to import it.", "warning");
+  const book = files.find(isSupportedBookFile);
+  if (book) importFile(book);
+  else {
+    showToast(
+      "Unsupported file. Use .epub, .pdf, .txt, .md, .markdown, .html, or .htm.",
+      "warning"
+    );
+  }
 });
 window.addEventListener("blur", hideDropOverlay);
 

@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "fflate": "^0.8.2",
-    "idb": "^8.0.0"
+    "idb": "^8.0.0",
+    "marked": "18.0.9",
+    "pdfjs-dist": "6.2.108"
   },
   "devDependencies": {
     "happy-dom": "^15.11.6",

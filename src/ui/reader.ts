@@ -217,7 +217,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     current.pause();
     const position = current.getPosition();
     const stats = current.getStats();
-    addSegment(stats);
+    if (stats.charsTyped > 0) addSegment(stats);
     if (runtimeBook && progress) {
       persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
     }
@@ -347,7 +347,20 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     overlayReturnFocus = null;
     overlayInterruptedSession = false;
     if (showPausedResults && interrupted && !lifetimeFinalized) {
-      renderSessionResults();
+      const hasScoredActivity =
+        segmentTotals.charsTyped !== 0 ||
+        segmentTotals.errors !== 0 ||
+        segmentTotals.timeMs !== 0;
+      if (hasScoredActivity) {
+        renderSessionResults();
+      } else if (chooserResumePosition && runtimeBook) {
+        const resumeAt = chooserResumePosition;
+        chooserResumePosition = undefined;
+        pausedPosition = undefined;
+        startSession(resumeAt);
+        hintEl.textContent = ACTIVE_READER_HINT;
+        return;
+      }
     }
     returnFocus?.focus();
   };
@@ -365,21 +378,43 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       onProgress: (position, charsCompleted) => {
         if (cancelled || generation !== sessionGeneration) return;
         const stats = created.getStats();
-        peakWpm = Math.max(peakWpm, stats.wpm);
-        persistProgress(position, charsCompleted, stats.wpm);
-        updateChrome(position, charsCompleted, stats);
+        const displayStats =
+          stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats;
+        peakWpm = Math.max(peakWpm, stats.wpm, displayStats?.wpm ?? 0);
+        persistProgress(position, charsCompleted, displayStats?.wpm);
+        updateChrome(position, charsCompleted, displayStats);
       },
       onStats: (stats) => {
         if (cancelled || generation !== sessionGeneration) return;
         peakWpm = Math.max(peakWpm, stats.wpm);
         updateChrome(created.getPosition(), charsAtPosition(runtimeBook!, created.getPosition()), stats);
       },
+      onBlockComplete: (stats, position) => {
+        if (cancelled || generation !== sessionGeneration) return;
+        // The engine resets immediately after this immutable snapshot. Fold
+        // it once into route totals and retain it visually until the next
+        // block receives real input.
+        addSegment(stats);
+        latestStats = stats;
+        persistProgress(position, charsAtPosition(runtimeBook!, position), stats.wpm);
+        updateChrome(position, charsAtPosition(runtimeBook!, position), stats);
+        queueMicrotask(() => {
+          if (cancelled || generation !== sessionGeneration || !session) return;
+          const nextPosition = created.getPosition();
+          updateChrome(nextPosition, charsAtPosition(runtimeBook!, nextPosition), latestStats);
+        });
+      },
       onSectionComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
         queueMicrotask(() => {
           if (cancelled || generation !== sessionGeneration) return;
           const position = created.getPosition();
-          updateChrome(position, charsAtPosition(runtimeBook!, position), created.getStats());
+          const stats = created.getStats();
+          updateChrome(
+            position,
+            charsAtPosition(runtimeBook!, position),
+            stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats
+          );
         });
       },
       onBookComplete: () => {
@@ -393,7 +428,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     const absoluteChars = charsAtPosition(runtimeBook, normalized);
     progress = { ...progress, totalChars: computeTotalChars(runtimeBook.sections, {}) };
     persistProgress(normalized, absoluteChars, undefined);
-    updateChrome(normalized, absoluteChars, created.getStats());
+    const startingStats = created.getStats();
+    updateChrome(
+      normalized,
+      absoluteChars,
+      startingStats.charsTyped > 0 && startingStats.elapsedMs > 0
+        ? startingStats
+        : latestStats
+    );
     created.start();
   };
 
@@ -462,6 +504,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       lifetimeFinalized = false;
       finalStats = undefined;
       segmentTotals = { ...EMPTY_TOTALS };
+      latestStats = undefined;
       peakWpm = 0;
     }
     const requested =
@@ -502,6 +545,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       lifetimeFinalized = false;
       finalStats = undefined;
       segmentTotals = { ...EMPTY_TOTALS };
+      latestStats = undefined;
       peakWpm = 0;
     }
     chooserResumePosition = undefined;
@@ -840,6 +884,17 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
           if (key.key.length === 1 || key.key === "Backspace" || key.key === "Enter") {
             shell.classList.add("reader-focused");
             playTypingClick();
+            const stats = session?.getStats();
+            const position = session?.getPosition();
+            if (
+              stats &&
+              stats.charsTyped > 0 &&
+              stats.elapsedMs > 0 &&
+              position &&
+              runtimeBook
+            ) {
+              updateChrome(position, charsAtPosition(runtimeBook, position), stats);
+            }
           }
         },
       },
@@ -885,10 +940,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
           })
         )
       ),
-      progressBarEl,
-      statsEl
+      progressBarEl
     );
-    shell.append(chrome, typingHost, hintEl);
+    // Live scoring is intentionally outside the fading navigation chrome:
+    // focused typing hides title/actions/progress, never enabled WPM/accuracy.
+    shell.append(chrome, statsEl, typingHost, hintEl);
     shell.addEventListener("pointermove", () => shell.classList.remove("reader-focused"));
     statsEl.hidden = true;
   };

@@ -87,6 +87,20 @@ export class SessionClock {
     return this.accumulatedMs;
   }
 
+  /** Start a fresh score run without starting its timer. The next accepted
+   * key calls recordActivity(), so time spent reading at a new block's caret
+   * never leaks into that block's WPM. */
+  reset(): void {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.startedAt = null;
+    this.segmentStart = null;
+    this.accumulatedMs = 0;
+    this.explicitlyPaused = false;
+  }
+
   destroy(): void {
     // Finalize a live segment as well as clearing the timer. Otherwise a
     // caller retaining the clock long enough to read final stats would see

@@ -1,5 +1,5 @@
 import type { ParsedBook, ParseResult, Section } from "../types";
-import { parseEpub } from "../epub";
+import { isSupportedBookFile, parseBookFile } from "../import/parse-book";
 import { addBook } from "../store/books";
 import {
   computeTotalChars,
@@ -42,13 +42,9 @@ function formatChars(n: number): string {
   return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k chars`;
 }
 
-function isEpubFile(file: File): boolean {
-  return /\.epub$/i.test(file.name) || file.type === "application/epub+zip";
-}
-
 function parseErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message;
-  return "That file couldn't be read as an EPUB. It may be damaged or use an unsupported format.";
+  return "That file couldn't be read. It may be damaged or use an unsupported format.";
 }
 
 function noFileFallback(container: HTMLElement): void {
@@ -57,8 +53,8 @@ function noFileFallback(container: HTMLElement): void {
     el(
       "div",
       { className: "import-screen" },
-      el("h1", {}, "import a book"),
-      el("p", { className: "text" }, "No file is selected yet — head back to the library and use “add epub”, or drop a .epub file anywhere on the window."),
+      el("h1", {}, "add a book"),
+      el("p", { className: "text" }, "No file is selected. Go back to the library and choose “add book”."),
       el(
         "button",
         { className: "button active", on: { click: () => navigate({ name: "library" }) } },
@@ -95,7 +91,7 @@ export function mountImport(container: HTMLElement): ScreenHandle {
           attrs: { role: "status", "aria-live": "polite", "aria-atomic": "true" },
         },
         el("div", { className: "spinner", attrs: { "aria-hidden": "true" } }),
-        el("p", {}, `Parsing ${selectedFile.name}…`),
+        el("p", {}, `Reading ${selectedFile.name}…`),
         el("p", { className: "field-sub" }, "Large books with big chapters can take a few seconds.")
       )
     );
@@ -105,7 +101,7 @@ export function mountImport(container: HTMLElement): ScreenHandle {
     clear(screen);
     screen.removeAttribute("aria-busy");
     screen.append(
-      el("h1", {}, "couldn't import that book"),
+      el("h1", {}, "couldn't import that file"),
       el("p", { className: "text", attrs: { role: "alert" } }, message),
       el(
         "div",
@@ -361,19 +357,19 @@ export function mountImport(container: HTMLElement): ScreenHandle {
     }
   }
 
-  if (!isEpubFile(selectedFile)) {
-    showError("Choose an EPUB file ending in .epub. Other ebook and document formats aren't supported yet.");
+  if (!isSupportedBookFile(selectedFile)) {
+    showError("Choose a supported book file: .epub · .pdf · .txt · .md · .html");
     return {};
   }
 
   showProgress();
   screen.setAttribute("aria-busy", "true");
   const settings = getAppState().settings;
-  parseEpub(selectedFile, { foldAccents: settings.foldAccents })
+  parseBookFile(selectedFile, { foldAccents: settings.foldAccents })
     .then((result) => {
       if (cancelled) return;
       if (!result.book.sections.some((section) => section.charCount > 0)) {
-        showError("This EPUB doesn't contain any readable text.");
+        showError("This book doesn't contain any readable text.");
         return;
       }
       void showReview(result).catch((error: unknown) => {
@@ -384,7 +380,7 @@ export function mountImport(container: HTMLElement): ScreenHandle {
     })
     .catch((err: unknown) => {
       if (cancelled) return;
-      console.error("EPUB parse failed", err);
+      console.error("Book import failed", err);
       showError(parseErrorMessage(err));
     });
 

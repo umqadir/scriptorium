@@ -19,7 +19,7 @@
  * └──────────────────────────────────────────────────────────────────────┘
  */
 
-// ─────────────────────────────── EPUB layer ───────────────────────────────
+// ───────────────────────────── Book/import layer ──────────────────────────
 
 export type BlockKind = "heading" | "paragraph" | "verse" | "blockquote";
 
@@ -33,12 +33,14 @@ export type Block = {
   text: string;
 };
 
-/** Where a spine item sits in the book's structure. */
+/** Where an imported section sits in the book's structure. */
 export type SectionKind = "body" | "frontmatter" | "backmatter";
 
 export type Section = {
-  /** Spine idref, unique within the book. */
+  /** Stable source-section id, unique within the book (an EPUB spine idref
+   *  where available; a generated id for other formats). */
   id: string;
+  /** Source-relative location or a generated anchor for synthetic sections. */
   href: string;
   title: string;
   order: number;
@@ -51,7 +53,7 @@ export type Section = {
 };
 
 export type BookMeta = {
-  /** Content hash of the raw EPUB bytes (sha-256, hex, first 16 chars).
+  /** Content hash of the raw source-file bytes (sha-256, hex, first 16 chars).
    *  Stable across devices — this is what progress sync keys on. */
   id: string;
   title: string;
@@ -165,7 +167,7 @@ export type Settings = {
   caretStyle: CaretStyle;
   smoothCaret: boolean;
   stopOnError: StopOnError;
-  /** Fold accented Latin letters to ASCII (ä→a). Applied at parse time. */
+  /** Fold accented Latin letters to ASCII (ä→a). Applied at import time. */
   foldAccents: boolean;
   soundOnClick: boolean;
   showLiveWpm: boolean;

@@ -1,12 +1,14 @@
 # Scriptorium
 
-Type your way through your own books. Monkeytype's feel, your EPUB library.
+Type your way through your own books and documents. Monkeytype's feel, your
+local reading library.
 
 [Open Scriptorium](https://umqadir.github.io/scriptorium/)
 
-Drop in an EPUB, pick which sections you actually want to type, and go. It keeps
-your place, tracks WPM, accuracy and consistency, and looks like Monkeytype
-because it borrows Monkeytype's themes and typing UI.
+Drop in an EPUB, PDF, plain-text, Markdown, or HTML file; pick which sections
+you actually want to type; and go. Scriptorium keeps your place, tracks WPM,
+accuracy and consistency, and looks like Monkeytype because it borrows
+Monkeytype's themes and typing UI.
 
 Runs entirely in the browser. No account, no server, no upload limits, no
 "3 books free" tier.
@@ -24,18 +26,30 @@ keystrokes as errors. This is the version that just works.
 against are the same characters at the same indices, normalized exactly once at
 parse time. This is not an implementation detail — it is the bug that motivated
 the project. Typing Tomes trims its comparison string but not its displayed
-string, so a single leading space in the EPUB's XHTML shifts every character by
+string, so a single leading space in an EPUB's XHTML shifts every character by
 one and every correct keystroke reads as wrong. Here there is no second string
-to drift.
+to drift, regardless of the imported format.
 
 **Your books stay on your machine.** Books live in your browser's IndexedDB and
 are never transmitted. Cross-device sync moves progress, settings and book
 *titles* only — never text. Books are keyed by a content hash, so importing the
-same EPUB on a second device automatically picks up the position you left off at
-on the first, without the file ever leaving either one.
+same source file on a second device automatically picks up the position you left
+off at on the first, without the file ever leaving either one.
 
 **Static and offline.** Builds to plain files, installs as a PWA, and reloads
 with the network off after the first visit.
+
+## Supported formats
+
+- EPUB (`.epub`)
+- PDF (`.pdf`)
+- Plain text (`.txt`)
+- Markdown (`.md`, `.markdown`)
+- HTML (`.html`, `.htm`)
+
+Every format passes through the same repair, normalization, and cleaning
+pipeline before typing begins. Headings become navigable sections where the
+source format exposes them; simpler files remain a single continuous section.
 
 ## EPUB handling
 
@@ -78,9 +92,10 @@ The production build includes the web manifest and service worker used for
 offline reloads. GitHub Pages deployment is defined in
 `.github/workflows/deploy.yml`.
 
-Stack: Vite, TypeScript, no UI framework. `fflate` for unzip, `idb` for storage.
-The typing hot path is hand-written DOM — on each keystroke only the character
-spans that changed are mutated.
+Stack: Vite, TypeScript, no UI framework. `fflate` handles EPUB archives,
+`pdfjs-dist` extracts PDF text, `marked` parses Markdown, and `idb` provides
+local storage. The typing hot path is hand-written DOM — on each keystroke only
+the character spans that changed are mutated.
 
 ## License
 

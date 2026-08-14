@@ -53,6 +53,15 @@
   display: none;
 }
 
+.reader-hint {
+  transition: opacity 0.2s ease;
+}
+
+.reader-shell.reader-focused .reader-hint {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .reader-no-sections,
 .reader-complete {
   min-height: 17rem;

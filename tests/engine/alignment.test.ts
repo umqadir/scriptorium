@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { TypingSession } from "../../src/engine/index";
+import type { SessionStats } from "../../src/types";
 import {
   getHiddenInput,
   makeBook,
@@ -71,12 +72,14 @@ describe("alignment regression", () => {
 
     let sectionCompletions: number[] = [];
     let bookCompleted = 0;
+    const blockStats: SessionStats[] = [];
 
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings(),
       onSectionComplete: (i) => sectionCompletions.push(i),
+      onBlockComplete: (stats) => blockStats.push(stats),
       onBookComplete: () => {
         bookCompleted += 1;
       },
@@ -90,10 +93,10 @@ describe("alignment regression", () => {
       if (index < section.blocks.length - 1) pressEnter(input);
     }
 
-    const stats = session.getStats();
-    expect(stats.accuracy).toBe(100);
-    expect(stats.errors).toBe(0);
-    expect(stats.charsTyped).toBe(
+    expect(blockStats).toHaveLength(section.blocks.length);
+    expect(blockStats.every((stats) => stats.accuracy === 100)).toBe(true);
+    expect(blockStats.reduce((sum, stats) => sum + stats.errors, 0)).toBe(0);
+    expect(blockStats.reduce((sum, stats) => sum + stats.charsTyped, 0)).toBe(
       totalIncludedChars(book) + section.blocks.length - 1,
     );
 
@@ -152,7 +155,15 @@ describe("alignment regression", () => {
     // state) while the position still lands exactly at the end.
     const text = "Don't panic: it's fine -- 99% of the time!";
     const book = makeBook([{ id: "ch1", blocks: [{ text }] }]);
-    const session = new TypingSession({ book, container, settings: makeSettings() });
+    let finalStats: SessionStats | undefined;
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+      onBlockComplete: (stats) => {
+        finalStats = stats;
+      },
+    });
     session.start();
     const input = getHiddenInput(container);
 
@@ -171,7 +182,7 @@ describe("alignment regression", () => {
       pressChar(input, expected);
     }
 
-    const stats = session.getStats();
+    const stats = finalStats!;
     // 2 wrong keystrokes + text.length correct keystrokes were made.
     expect(stats.charsTyped).toBe(text.length + mistakes);
     expect(stats.errors).toBe(mistakes);

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_SETTINGS, type BookProgress, type ParsedBook } from "../../src/types";
 import { createInitialProgress } from "../../src/store/progress";
 import { initAppState } from "../../src/ui/state";
@@ -60,6 +60,10 @@ describe("mountReader", () => {
     location.hash = "#/reader/book-1";
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("handles a missing local book without starting the engine", async () => {
     storage.getBook.mockResolvedValue(undefined);
     storage.getProgress.mockResolvedValue(undefined);
@@ -118,6 +122,70 @@ describe("mountReader", () => {
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
   });
 
+  test("keeps block runs independent in chrome and lifetime without interrupting between paragraphs", async () => {
+    vi.useFakeTimers();
+    const parsed = book("ab");
+    parsed.sections[0]!.blocks.push({ kind: "paragraph", text: "cd" });
+    parsed.sections[0]!.charCount = 4;
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 4));
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+
+    const handle = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    const input = host.querySelector(".scr-hidden-input")!;
+    const press = (key: string) =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+    press("a");
+    await vi.advanceTimersByTimeAsync(1_000);
+    press("b");
+    await vi.advanceTimersByTimeAsync(1_000);
+    press("Enter");
+
+    expect(host.querySelector(".reader-session-results")).toBeNull();
+    expect(host.textContent).not.toContain("session paused");
+    expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
+    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
+    press("c");
+    // At the exact first-key instant elapsed time is zero, so retain the
+    // completed run rather than flashing a meaningless 0 WPM.
+    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
+    await vi.advanceTimersByTimeAsync(250);
+    const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
+    expect(liveStats.textContent).not.toContain("18 wpm");
+    expect(host.querySelector(".reader-shell")?.classList).toContain("reader-focused");
+    expect(liveStats.hidden).toBe(false);
+    expect(liveStats.closest(".reader-chrome")).toBeNull();
+    await vi.advanceTimersByTimeAsync(750);
+    press("d");
+
+    expect(host.textContent).toContain("book complete");
+    handle.unmount?.();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+    const snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    const withLifetime = snapshots.filter((snapshot) => snapshot.lifetime.sessions === 1);
+    expect(withLifetime.length).toBeGreaterThan(0);
+    const latest = withLifetime.at(-1)!;
+    expect(latest.lifetime).toEqual({
+      charsTyped: 5,
+      errors: 0,
+      timeMs: 3_000,
+      sessions: 1,
+    });
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    host.remove();
+  });
+
   test("shows useful session results on Escape and can resume in place", async () => {
     const parsed = book("ab");
     storage.getBook.mockResolvedValue(stored(parsed));
@@ -171,8 +239,8 @@ describe("mountReader", () => {
     );
     const initial: BookProgress = {
       ...createInitialProgress("book-1", 4),
-      position: { sectionIndex: 0, blockIndex: 0, charIndex: 1 },
-      charsCompleted: 1,
+      position: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      charsCompleted: 0,
     };
     storage.getBook.mockResolvedValue(stored(parsed));
     storage.getProgress.mockResolvedValue(initial);
@@ -183,6 +251,9 @@ describe("mountReader", () => {
     await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
     await vi.waitFor(() => expect(storage.saveProgress).toHaveBeenCalled());
     storage.saveProgress.mockClear();
+    host.querySelector(".scr-hidden-input")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", bubbles: true })
+    );
     const contentsControl = host.querySelector(
       ".reader-contents-control"
     ) as HTMLButtonElement;
@@ -233,6 +304,36 @@ describe("mountReader", () => {
     expect(targetIndex).toBeGreaterThan(outgoingIndex);
     handle.unmount?.();
     host.remove();
+  });
+
+  test("closing contents before typing resumes silently at the same idle position", async () => {
+    const parsed = book("ab");
+    parsed.sections[0]!.blocks.push({ kind: "paragraph", text: "cd" });
+    parsed.sections[0]!.charCount = 4;
+    const initial: BookProgress = {
+      ...createInitialProgress("book-1", 4),
+      position: { sectionIndex: 0, blockIndex: 0, charIndex: 1 },
+      charsCompleted: 1,
+    };
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(initial);
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+    (host.querySelector(".reader-contents-control") as HTMLButtonElement).click();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(host.querySelector(".reader-session-results")).toBeNull();
+    expect(host.textContent).not.toContain("session paused");
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe("0 wpm100% accuracy");
+    expect(host.querySelector(".reader-live-stats")?.hasAttribute("hidden")).toBe(true);
+    expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
+    expect(host.querySelector(".reader-section-title")?.textContent).toBe("Chapter One");
+    handle.unmount?.();
   });
 
   test("canonicalizes overrides and clamps completion when the included corpus shrinks", async () => {

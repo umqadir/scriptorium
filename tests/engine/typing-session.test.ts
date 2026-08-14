@@ -302,14 +302,73 @@ describe("explicit block boundaries", () => {
     session.destroy();
   });
 
-  test("requires one Backspace per wrong boundary key and blocks Enter until clear", () => {
+  test("scores each source block independently and excludes idle time at the next caret", () => {
+    vi.useFakeTimers();
+    const checkpoints = vi.fn();
+    const onBookComplete = vi.fn();
     const book = makeBook([
-      { id: "ch1", blocks: [{ text: "a" }, { text: "b" }] },
+      { id: "ch1", blocks: [{ text: "ab" }, { text: "cd" }] },
     ]);
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings(),
+      onBlockComplete: checkpoints,
+      onBookComplete,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    pressChar(input, "a");
+    vi.advanceTimersByTime(1_000);
+    pressChar(input, "b");
+    vi.advanceTimersByTime(1_000);
+    pressEnter(input);
+
+    expect(checkpoints).toHaveBeenCalledTimes(1);
+    expect(checkpoints.mock.calls[0]?.[0]).toMatchObject({
+      charsTyped: 3,
+      errors: 0,
+      accuracy: 100,
+      elapsedMs: 2_000,
+    });
+    expect(checkpoints.mock.calls[0]?.[1]).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 2,
+    });
+    expect(session.getStats()).toMatchObject({ charsTyped: 0, elapsedMs: 0 });
+
+    vi.advanceTimersByTime(20_000);
+    expect(session.getStats()).toMatchObject({ charsTyped: 0, elapsedMs: 0 });
+    pressChar(input, "c");
+    vi.advanceTimersByTime(1_000);
+    pressChar(input, "d");
+
+    expect(checkpoints).toHaveBeenCalledTimes(2);
+    expect(checkpoints.mock.calls[1]?.[0]).toMatchObject({
+      charsTyped: 2,
+      errors: 0,
+      accuracy: 100,
+      elapsedMs: 1_000,
+    });
+    expect(onBookComplete).toHaveBeenCalledTimes(1);
+    expect(onBookComplete.mock.invocationCallOrder[0]).toBeGreaterThan(
+      checkpoints.mock.invocationCallOrder[1]!,
+    );
+    session.destroy();
+  });
+
+  test("requires one Backspace per wrong boundary key and blocks Enter until clear", () => {
+    const book = makeBook([
+      { id: "ch1", blocks: [{ text: "a" }, { text: "b" }] },
+    ]);
+    const onBlockComplete = vi.fn();
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+      onBlockComplete,
     });
     session.start();
     const input = getHiddenInput(container);
@@ -344,9 +403,10 @@ describe("explicit block boundaries", () => {
       blockIndex: 1,
       charIndex: 0,
     });
-    // The two wrong printable keys and two blocked Enter attempts remain
-    // permanent accuracy history after their reversible extras are removed.
-    expect(session.getStats().errors).toBe(4);
+    // The completed run preserves its permanent error history, while the
+    // next block starts with fresh scoring counters.
+    expect(onBlockComplete.mock.calls[0]?.[0].errors).toBe(4);
+    expect(session.getStats().errors).toBe(0);
     session.destroy();
   });
 
@@ -506,11 +566,13 @@ describe("stopOnError behaviour", () => {
   test("'word' mode gates a block's final word and completes only after correction", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "cat" }] }]);
     let completed = 0;
+    const onBlockComplete = vi.fn();
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings({ stopOnError: "word" }),
       onBookComplete: () => completed++,
+      onBlockComplete,
     });
     session.start();
     const input = getHiddenInput(container);
@@ -523,7 +585,8 @@ describe("stopOnError behaviour", () => {
     expect(session.getPosition().charIndex).toBe(2);
     pressChar(input, "t");
     expect(completed).toBe(1);
-    expect(session.getStats().errors).toBe(1);
+    expect(onBlockComplete.mock.calls[0]?.[0].errors).toBe(1);
+    expect(session.getStats().errors).toBe(0);
 
     session.destroy();
   });

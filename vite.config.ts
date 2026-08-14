@@ -11,9 +11,9 @@ export default defineConfig({
       includeAssets: ["favicon.svg", "apple-touch-icon.png"],
       manifest: {
         id: ".",
-        name: "Scriptorium — EPUB Typing Reader",
+        name: "Scriptorium — Typing Reader",
         short_name: "Scriptorium",
-        description: "Type your way through your own EPUBs, entirely on your device.",
+        description: "Type your way through EPUB, PDF, TXT, Markdown, and HTML books—entirely on your device.",
         lang: "en",
         start_url: ".",
         scope: ".",
@@ -46,7 +46,8 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,avif,woff,woff2,ttf,otf}"],
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        globPatterns: ["**/*.{js,mjs,css,html,ico,png,svg,webp,avif,woff,woff2,ttf,otf}"],
         globIgnores: [
           "**/apple-touch-icon.png",
           "**/favicon.svg",

@@ -18,7 +18,7 @@
  * "newest wins" rule apply to them would silently erase typing history or
  * a personal best recorded on the device that loses the updatedAt race.
  * A book present on only one side is kept as-is (it re-links automatically
- * on the other device once the same EPUB is imported there, because the
+ * on the other device once the same source file is imported there, because the
  * key is the book's content hash).
  */
 import type { BookProgress, LifetimeStats, Position, Settings, SyncPayload } from "../types";
@@ -88,7 +88,7 @@ export function mergeSyncPayload(local: SyncPayload, remote: SyncPayload): SyncP
       progress[id] = mergeProgressRecord(l, r);
     } else {
       // Present on only one side: keep it. It re-links automatically once
-      // the matching EPUB (same content hash) is imported on the other
+      // the matching source file (same content hash) is imported on the other
       // device — dropping it here would silently lose real typing history.
       progress[id] = (l ?? r)!;
     }

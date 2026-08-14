@@ -2,12 +2,16 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { ParseResult, ParseWarning } from "../../src/types";
 
 const mocks = vi.hoisted(() => ({
-  parseEpub: vi.fn(),
+  parseBookFile: vi.fn(),
+  isSupportedBookFile: vi.fn(() => true),
   getProgress: vi.fn(async () => undefined),
   navigate: vi.fn(),
 }));
 
-vi.mock("../../src/epub", () => ({ parseEpub: mocks.parseEpub }));
+vi.mock("../../src/import/parse-book", () => ({
+  parseBookFile: mocks.parseBookFile,
+  isSupportedBookFile: mocks.isSupportedBookFile,
+}));
 vi.mock("../../src/store/books", () => ({ addBook: vi.fn(async () => undefined) }));
 vi.mock("../../src/store/progress", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/store/progress")>();
@@ -32,7 +36,9 @@ function diagnostic(code: ParseWarning["code"], message: string): ParseWarning {
 describe("import review", () => {
   beforeEach(() => {
     document.body.replaceChildren();
-    mocks.parseEpub.mockReset();
+    mocks.parseBookFile.mockReset();
+    mocks.isSupportedBookFile.mockReset();
+    mocks.isSupportedBookFile.mockReturnValue(true);
     mocks.getProgress.mockClear();
     mocks.navigate.mockClear();
   });
@@ -81,7 +87,7 @@ describe("import review", () => {
       },
       warnings,
     };
-    mocks.parseEpub.mockResolvedValue(result);
+    mocks.parseBookFile.mockResolvedValue(result);
 
     startImportFlow(new File(["epub"], "iliad.epub", { type: "application/epub+zip" }));
     const host = document.createElement("main");
@@ -100,5 +106,45 @@ describe("import review", () => {
     expect(host.textContent).not.toContain("hyphenations");
     expect(host.textContent).not.toContain("Empty");
     expect(host.querySelector(".warning-panel")).toBeNull();
+  });
+
+  test("imports a supported plain-text book through the unified parser", async () => {
+    const result: ParseResult = {
+      book: {
+        meta: {
+          id: "notes",
+          title: "Field Notes",
+          author: "Unknown author",
+          language: "en",
+          addedAt: 1,
+        },
+        sections: [
+          {
+            id: "document",
+            href: "notes.txt",
+            title: "Field Notes",
+            order: 0,
+            kind: "body",
+            included: true,
+            blocks: [{ kind: "paragraph", text: "A short plain-text book." }],
+            charCount: 24,
+          },
+        ],
+      },
+      warnings: [],
+    };
+    mocks.parseBookFile.mockResolvedValue(result);
+    const file = new File(["A short plain-text book."], "notes.txt", { type: "text/plain" });
+
+    startImportFlow(file);
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+    mountImport(host);
+
+    await vi.waitFor(() => expect(host.textContent).toContain("Field Notes"));
+    expect(mocks.isSupportedBookFile).toHaveBeenCalledWith(file);
+    expect(mocks.parseBookFile).toHaveBeenCalledWith(file, { foldAccents: true });
+    expect(host.querySelectorAll(".section-row")).toHaveLength(1);
+    expect(host.textContent).not.toMatch(/epub/i);
   });
 });

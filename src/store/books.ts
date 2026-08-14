@@ -1,5 +1,5 @@
 /**
- * Book storage: the parsed EPUB (sections + raw bytes) plus its small
+ * Book storage: the parsed source document (sections + raw bytes) plus its small
  * metadata record. `listBooks` only ever reads `bookMeta`, so rendering the
  * library grid never deserializes any book's section text.
  */

@@ -1,4 +1,5 @@
 import type { BookMeta, BookProgress } from "../types";
+import { SUPPORTED_BOOK_ACCEPT, isSupportedBookFile } from "../import/parse-book";
 import { deleteBook, listBooks } from "../store/books";
 import { getProgress } from "../store/progress";
 import { el, clear } from "./dom";
@@ -103,12 +104,12 @@ function emptyState(onAdd: () => void): HTMLElement {
     "div",
     { className: "empty-state" },
     iconSpan("book"),
-    el("p", {}, "Import an EPUB and type your way through it, resuming right where you left off."),
+    el("p", {}, "Add a book to start typing. Your progress saves automatically."),
     el(
       "button",
       { className: "button active", on: { click: onAdd } },
       iconSpan("plus"),
-      "add your first epub"
+      "add your first book"
     )
   );
 }
@@ -118,7 +119,7 @@ function fileInput(onFile: (file: File) => void): HTMLInputElement {
     className: "visually-hidden",
     attrs: {
       type: "file",
-      accept: ".epub,application/epub+zip",
+      accept: SUPPORTED_BOOK_ACCEPT,
       hidden: true,
       tabindex: "-1",
       "aria-hidden": "true",
@@ -126,7 +127,8 @@ function fileInput(onFile: (file: File) => void): HTMLInputElement {
     on: {
       change: () => {
         const file = input.files?.[0];
-        if (file) onFile(file);
+        if (file && isSupportedBookFile(file)) onFile(file);
+        else if (file) showToast("Choose an EPUB, PDF, text, Markdown, or HTML book.", "warning");
         input.value = "";
       },
     },
@@ -140,9 +142,9 @@ export function mountLibrary(container: HTMLElement): ScreenHandle {
   const addFile = fileInput((file) => startImportFlow(file));
   const addButton = el(
     "button",
-    { className: "button active", attrs: { type: "button" } },
+    { className: "button active", attrs: { type: "button", hidden: true } },
     iconSpan("plus"),
-    "add epub"
+    "add book"
   );
   addButton.addEventListener("click", () => addFile.click());
 
@@ -174,6 +176,7 @@ export function mountLibrary(container: HTMLElement): ScreenHandle {
     }
     if (cancelled) return;
     gridHost.setAttribute("aria-busy", "false");
+    addButton.hidden = rows.length === 0;
     clear(gridHost);
     if (rows.length === 0) {
       gridHost.appendChild(emptyState(() => addFile.click()));

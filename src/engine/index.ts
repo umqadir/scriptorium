@@ -63,6 +63,9 @@ export type TypingSessionOptions = {
   onProgress?: (position: Position, charsCompleted: number) => void;
   /** Fires ~4x/sec while typing, for the live WPM/accuracy readout. */
   onStats?: (stats: SessionStats) => void;
+  /** Fires once per completed source block. For non-final blocks the
+   * successful Enter is included; the final block fires before book complete. */
+  onBlockComplete?: (stats: SessionStats, position: Position) => void;
   onSectionComplete?: (sectionIndex: number) => void;
   onBookComplete?: () => void;
 };
@@ -584,6 +587,7 @@ export class TypingSession {
     this.recordKeystroke(true);
     this.setBoundaryState(sectionIndex, blockIndex, "correct");
     this.boundaryErrors.delete(blockKey(sectionIndex, blockIndex));
+    this.emitBlockCheckpoint();
     this.advancePastBoundary(next);
     this.scheduleProgressSave();
   }
@@ -754,12 +758,28 @@ export class TypingSession {
       return;
     }
 
+    this.emitBlockCheckpoint();
     this.opts.onSectionComplete?.(sectionIndex);
     this.finished = true;
     this.clock.pause();
     this.stopActivityTimers();
     this.flushProgressSave();
     this.opts.onBookComplete?.();
+  }
+
+  private emitBlockCheckpoint(): void {
+    // Freeze the completed run before notifying consumers. Resetting also
+    // stops live-stat/sample callbacks, preventing a zero-stat flash while
+    // the reader waits at the next block's caret.
+    this.clock.pause();
+    this.stopActivityTimers();
+    const stats = this.getStats();
+    this.opts.onBlockComplete?.(stats, this.getPosition());
+    this.totalKeystrokes = 0;
+    this.correctKeystrokes = 0;
+    this.keystrokesThisSecond = 0;
+    this.rawWpmSamples = [];
+    this.clock.reset();
   }
 
   private advancePastBoundary(next: {
