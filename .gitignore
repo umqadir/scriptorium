@@ -1,0 +1,10 @@
+node_modules/
+dist/
+upstream-monkeytype/
+.DS_Store
+*.local
+.playwright-cli/
+
+# Real books are for LOCAL testing only — never commit copyrighted material.
+# CI uses the synthetic fixture in tests/fixtures/synthetic-epub.ts instead.
+tests/fixtures/*.epub

@@ -1,0 +1,352 @@
+.reader-loading {
+  min-height: 45vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 1rem;
+  color: var(--sub-color);
+}
+
+.reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.reader-contents-control {
+  padding: 0.5rem 0.65rem;
+  color: var(--sub-color);
+  background: transparent;
+  font-size: 0.78rem;
+}
+
+.reader-contents-control:hover {
+  color: var(--text-color);
+  background: var(--sub-alt-color);
+}
+
+.reader-contents-control .icon,
+.reader-contents-control .icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.reader-section-title {
+  justify-self: center;
+  width: fit-content;
+  max-width: min(100%, 42rem);
+  padding: 0.1rem 0.35rem;
+  overflow: hidden;
+  color: var(--sub-color);
+  background: transparent;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-section-title:hover {
+  color: var(--main-color);
+  background: transparent;
+}
+
+.reader-live-stats[hidden] {
+  display: none;
+}
+
+.reader-no-sections,
+.reader-complete {
+  min-height: 17rem;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+.reader-no-sections p,
+.reader-error-copy {
+  max-width: 34rem;
+  color: var(--sub-color);
+}
+
+.reader-complete-icon {
+  display: grid;
+  width: 2.8rem;
+  height: 2.8rem;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--bg-color);
+  background: var(--main-color);
+}
+
+.reader-complete-icon svg {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+.reader-complete-kicker {
+  color: var(--main-color);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.reader-complete h1 {
+  max-width: 34rem;
+  font-size: clamp(1.35rem, 4vw, 2rem);
+}
+
+.reader-complete .results-grid {
+  width: min(100%, 32rem);
+  margin: 0.75rem 0;
+}
+
+.reader-complete-actions {
+  justify-content: center;
+}
+
+.reader-session-results {
+  display: grid;
+  justify-items: center;
+  gap: 1.1rem;
+  padding: 0.25rem 0;
+}
+
+.reader-session-results h2 {
+  color: var(--sub-color);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.reader-session-primary {
+  width: min(100%, 22rem);
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.reader-session-details {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1.5rem;
+  width: min(100%, 38rem);
+}
+
+.reader-session-details > div {
+  display: grid;
+  gap: 0.15rem;
+  color: var(--text-color);
+  text-align: center;
+}
+
+.reader-session-details .label {
+  color: var(--sub-color);
+  font-size: 0.7rem;
+}
+
+.reader-session-actions {
+  justify-content: center;
+}
+
+.reader-chooser-backdrop {
+  position: fixed;
+  z-index: 1100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: color-mix(in srgb, var(--bg-color) 72%, transparent);
+  backdrop-filter: blur(5px);
+}
+
+.reader-chooser-panel {
+  width: min(100%, 42rem);
+  max-height: min(82vh, 48rem);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 1rem;
+  padding: 1.25rem;
+  border-radius: var(--roundness);
+  color: var(--text-color);
+  background: var(--bg-color);
+  box-shadow: 0 0 0 0.15rem var(--sub-alt-color), 0 1.5rem 5rem color-mix(in srgb, var(--bg-color) 75%, transparent);
+}
+
+.reader-chooser-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.reader-chooser-heading h2 {
+  font-size: 1.1rem;
+}
+
+.reader-chooser-summary {
+  margin-top: 0.2rem;
+  color: var(--sub-color);
+  font-size: 0.78rem;
+}
+
+.reader-section-list {
+  min-height: 8rem;
+  overflow-y: auto;
+}
+
+.reader-section-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.7rem;
+  border-bottom: 1px solid var(--sub-alt-color);
+}
+
+.reader-section-row.excluded {
+  opacity: 0.55;
+}
+
+.reader-section-details {
+  min-width: 0;
+  display: grid;
+  justify-items: start;
+  gap: 0.1rem;
+  padding: 0.65rem 0;
+  text-align: left;
+}
+
+.reader-section-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-section-meta {
+  color: var(--sub-color);
+  font-size: 0.7rem;
+}
+
+.reader-chooser-actions {
+  justify-content: flex-end;
+}
+
+.reader-contents-panel {
+  width: min(100%, 38rem);
+}
+
+.reader-contents-list {
+  min-height: 10rem;
+  overflow-y: auto;
+  border-top: 1px solid var(--sub-alt-color);
+}
+
+.reader-contents-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 2.2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.8rem 0.25rem;
+  border-bottom: 1px solid var(--sub-alt-color);
+  border-radius: 0;
+  color: var(--text-color);
+  background: transparent;
+  text-align: left;
+}
+
+.reader-contents-item:hover {
+  color: var(--main-color);
+  background: transparent;
+}
+
+.reader-contents-item.current {
+  color: var(--main-color);
+}
+
+.reader-contents-order {
+  color: var(--sub-color);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-contents-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-contents-progress {
+  color: var(--sub-color);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.reader-contents-item.current .reader-contents-progress {
+  color: var(--main-color);
+}
+
+.reader-contents-footer {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.reader-edit-included {
+  padding-inline: 0;
+  font-size: 0.78rem;
+}
+
+.reader-error-action {
+  justify-self: start;
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 600px) {
+  .reader-topbar {
+    gap: 0.45rem;
+  }
+
+  .reader-actions {
+    gap: 0.2rem;
+  }
+
+  .reader-contents-control {
+    padding-inline: 0.45rem;
+  }
+
+  .reader-contents-control > span:last-child {
+    display: none;
+  }
+
+  .reader-complete .results-grid {
+    gap: 0.5rem;
+  }
+
+  .reader-complete .results-stat .value {
+    font-size: 1.25rem;
+  }
+
+  .reader-session-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+  }
+
+  .reader-chooser-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .reader-chooser-panel {
+    width: 100%;
+    max-height: 88vh;
+    border-radius: var(--roundness) var(--roundness) 0 0;
+  }
+
+  .reader-contents-item {
+    grid-template-columns: 1.7rem minmax(0, 1fr);
+    gap: 0.55rem;
+  }
+
+  .reader-contents-progress {
+    grid-column: 2;
+  }
+}

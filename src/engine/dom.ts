@@ -1,0 +1,297 @@
+/**
+ * DOM construction and low-level mutation helpers for the typing renderer.
+ *
+ * Performance contract: `renderWindow` is the only function that rebuilds
+ * markup wholesale, and it is only called when the set of visible blocks
+ * changes (i.e. on block/section transitions), never per keystroke.
+ * Per-keystroke updates go through `setCharClass` / `renderExtras`, which
+ * mutate exactly the span(s) that changed.
+ */
+
+import type { Block, CaretStyle, Settings, CharState } from "../types";
+
+export type DomRefs = {
+  rootEl: HTMLDivElement;
+  viewportEl: HTMLDivElement;
+  textEl: HTMLDivElement;
+  caretEl: HTMLDivElement;
+  hiddenInputEl: HTMLInputElement;
+};
+
+export function blockKey(sectionIndex: number, blockIndex: number): string {
+  return `${sectionIndex}:${blockIndex}`;
+}
+
+export function charKey(
+  sectionIndex: number,
+  blockIndex: number,
+  charIndex: number,
+): string {
+  return `${sectionIndex}:${blockIndex}:${charIndex}`;
+}
+
+export function buildDom(
+  container: HTMLElement,
+  settings: Settings,
+): DomRefs {
+  const rootEl = document.createElement("div");
+  rootEl.className = "scr-root";
+
+  const viewportEl = document.createElement("div");
+  viewportEl.className = "scr-viewport";
+
+  const textEl = document.createElement("div");
+  textEl.className = "scr-text";
+
+  const caretEl = document.createElement("div");
+  caretEl.className = "scr-caret";
+
+  const hiddenInputEl = document.createElement("input");
+  hiddenInputEl.type = "text";
+  hiddenInputEl.className = "scr-hidden-input";
+  hiddenInputEl.autocomplete = "off";
+  hiddenInputEl.setAttribute("autocorrect", "off");
+  hiddenInputEl.setAttribute("autocapitalize", "off");
+  hiddenInputEl.spellcheck = false;
+  hiddenInputEl.setAttribute("aria-label", "Typing input");
+  hiddenInputEl.tabIndex = 0;
+
+  viewportEl.appendChild(textEl);
+  viewportEl.appendChild(caretEl);
+  rootEl.appendChild(viewportEl);
+  rootEl.appendChild(hiddenInputEl);
+  container.appendChild(rootEl);
+
+  applyFont(rootEl, settings);
+  applyCaretStyle(caretEl, settings.caretStyle);
+  applySmoothCaret(caretEl, settings.smoothCaret);
+
+  return { rootEl, viewportEl, textEl, caretEl, hiddenInputEl };
+}
+
+export function applyFont(rootEl: HTMLElement, settings: Settings): void {
+  rootEl.style.setProperty("--scr-font-family", settings.fontFamily);
+  rootEl.style.setProperty("--scr-font-size", `${settings.fontSize}rem`);
+}
+
+export function applyCaretStyle(
+  caretEl: HTMLElement,
+  style: CaretStyle,
+): void {
+  caretEl.className = `scr-caret scr-caret--${style}`;
+}
+
+export function applySmoothCaret(caretEl: HTMLElement, smooth: boolean): void {
+  caretEl.classList.toggle("scr-caret--smooth", smooth);
+}
+
+export type RenderedBlock = {
+  sectionIndex: number;
+  blockIndex: number;
+  block: Block;
+  /** Whether another typeable block follows this one in reading order. */
+  hasBoundary?: boolean;
+};
+
+export type BoundaryState = "pending" | "correct" | "incorrect";
+
+export type WindowRefs = {
+  spanIndex: Map<string, HTMLSpanElement>;
+  extrasIndex: Map<string, HTMLSpanElement>;
+  boundaryIndex: Map<string, HTMLSpanElement>;
+  blockElIndex: Map<string, HTMLDivElement>;
+};
+
+/** Rebuild the visible window of blocks. Called only on block/section
+ * transitions (or settings changes affecting layout), never per keystroke. */
+export function renderWindow(
+  textEl: HTMLElement,
+  blocks: RenderedBlock[],
+  charStateOf: (
+    sectionIndex: number,
+    blockIndex: number,
+    charIndex: number,
+  ) => CharState,
+  extrasOf: (
+    sectionIndex: number,
+    blockIndex: number,
+    wordStart: number,
+  ) => string[],
+  boundaryStateOf: (
+    sectionIndex: number,
+    blockIndex: number,
+  ) => BoundaryState = () => "pending",
+): WindowRefs {
+  textEl.innerHTML = "";
+  const spanIndex = new Map<string, HTMLSpanElement>();
+  const extrasIndex = new Map<string, HTMLSpanElement>();
+  const boundaryIndex = new Map<string, HTMLSpanElement>();
+  const blockElIndex = new Map<string, HTMLDivElement>();
+
+  for (const { sectionIndex, blockIndex, block, hasBoundary = false } of blocks) {
+    const blockEl = document.createElement("div");
+    blockEl.className = `scr-block scr-block--${block.kind}`;
+    blockElIndex.set(blockKey(sectionIndex, blockIndex), blockEl);
+
+    const text = block.text;
+    let wordStart = 0;
+    let wordEl = document.createElement("span");
+    wordEl.className = "scr-word";
+
+    const finishWord = (
+      delimiter?: HTMLSpanElement,
+      appendBoundary = false,
+    ): void => {
+      const extrasEl = document.createElement("span");
+      extrasEl.className = "scr-extras";
+      for (const extraCh of extrasOf(sectionIndex, blockIndex, wordStart)) {
+        extrasEl.appendChild(makeExtraSpan(extraCh));
+      }
+      wordEl.appendChild(extrasEl);
+      // Keep the canonical delimiter inside the word's flex item. This is
+      // the same visual model Monkeytype uses: the browser may wrap between
+      // words, never between a word and its following space.
+      if (delimiter) wordEl.appendChild(delimiter);
+      if (appendBoundary) {
+        const boundaryEl = document.createElement("span");
+        setBoundaryClass(boundaryEl, boundaryStateOf(sectionIndex, blockIndex));
+        boundaryEl.textContent = "¶";
+        boundaryEl.setAttribute("aria-label", "Press Enter for new line");
+        wordEl.appendChild(boundaryEl);
+        boundaryIndex.set(blockKey(sectionIndex, blockIndex), boundaryEl);
+      }
+      extrasIndex.set(`${sectionIndex}:${blockIndex}:${wordStart}`, extrasEl);
+      blockEl.appendChild(wordEl);
+    };
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      const span = document.createElement("span");
+      span.className = `scr-char scr-char--${charStateOf(sectionIndex, blockIndex, i)}`;
+      span.textContent = ch;
+      if (ch === " ") span.classList.add("scr-char--space");
+      spanIndex.set(charKey(sectionIndex, blockIndex, i), span);
+
+      const isDelimiter = ch === " ";
+      const isLastChar = i === text.length - 1;
+      if (isDelimiter) {
+        finishWord(span, isLastChar && hasBoundary);
+        wordStart = i + 1;
+        wordEl = document.createElement("span");
+        wordEl.className = "scr-word";
+      } else {
+        wordEl.appendChild(span);
+        if (isLastChar) {
+          wordEl.classList.add("scr-word--block-end");
+          finishWord(undefined, hasBoundary);
+        }
+      }
+    }
+
+    if (hasBoundary) {
+      const lineBreakEl = document.createElement("span");
+      lineBreakEl.className = "scr-line-break";
+      lineBreakEl.setAttribute("aria-hidden", "true");
+      blockEl.appendChild(lineBreakEl);
+    }
+
+    textEl.appendChild(blockEl);
+  }
+
+  return { spanIndex, extrasIndex, boundaryIndex, blockElIndex };
+}
+
+function makeExtraSpan(ch: string): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.className = "scr-char scr-char--incorrect scr-char--extra";
+  span.textContent = ch;
+  return span;
+}
+
+export function setCharClass(span: HTMLSpanElement, state: CharState): void {
+  const isSpace = span.classList.contains("scr-char--space");
+  span.className = `scr-char scr-char--${state}${isSpace ? " scr-char--space" : ""}`;
+}
+
+export function setBoundaryClass(
+  span: HTMLSpanElement,
+  state: BoundaryState,
+): void {
+  span.className = `scr-boundary scr-boundary--${state}`;
+}
+
+export function renderExtras(extrasEl: HTMLSpanElement, chars: string[]): void {
+  extrasEl.innerHTML = "";
+  for (const ch of chars) extrasEl.appendChild(makeExtraSpan(ch));
+}
+
+/**
+ * Position the caret element relative to the viewport. `anchor` is the span
+ * the caret should sit before (line/underline styles) or over (block
+ * style); pass `after: true` to instead sit just after it (used when
+ * trailing extra characters are present).
+ */
+export function positionCaret(
+  caretEl: HTMLElement,
+  viewportEl: HTMLElement,
+  anchor: HTMLElement | null,
+  style: CaretStyle,
+  after: boolean,
+): void {
+  if (style === "off" || !anchor) {
+    caretEl.style.opacity = "0";
+    return;
+  }
+  caretEl.style.opacity = "";
+
+  const viewportRect = viewportEl.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const scrollTop = viewportEl.scrollTop;
+  const scrollLeft = viewportEl.scrollLeft;
+
+  const top = anchorRect.top - viewportRect.top + scrollTop;
+  const height = anchorRect.height || 0;
+  let left = anchorRect.left - viewportRect.left + scrollLeft;
+  let width = anchorRect.width || 0;
+
+  if (style === "underline") {
+    if (after) left += width;
+    const thickness = Math.max(1, height * 0.08);
+    caretEl.style.width = `${width}px`;
+    caretEl.style.height = `${thickness}px`;
+    caretEl.style.transform = `translate(${left}px, ${top + height - thickness}px)`;
+    return;
+  }
+
+  if (style === "block") {
+    // Sit over the character itself.
+    if (after) left = left + width;
+    caretEl.style.width = `${width}px`;
+  } else {
+    // line: a thin bar before (or after) the character.
+    if (after) left = left + width;
+    width = 0;
+    caretEl.style.width = "";
+  }
+
+  caretEl.style.transform = `translate(${left}px, ${top}px)`;
+  caretEl.style.height = `${height}px`;
+}
+
+/** Keep the active line roughly vertically stable as the user progresses,
+ * the way Monkeytype scrolls a finished line out of view. No-op (safely)
+ * under happy-dom, where layout metrics are always zero. */
+export function keepLineInView(
+  viewportEl: HTMLElement,
+  activeLineTop: number,
+  lineHeight: number,
+): void {
+  if (!lineHeight) return;
+  const targetTop = lineHeight; // keep the active line pinned near the top
+  const targetScrollTop = Math.max(0, activeLineTop - targetTop);
+  if (Math.abs(viewportEl.scrollTop - targetScrollTop) < 1) return;
+  // activeLineTop is already in content coordinates. Assigning the absolute
+  // target makes this idempotent; adding the value made every keystroke on
+  // one physical row scroll another row and pushed the text out of view.
+  viewportEl.scrollTop = targetScrollTop;
+}

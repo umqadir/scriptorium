@@ -1,0 +1,169 @@
+/*
+ * Scriptorium typing engine styles.
+ *
+ * Colour tokens follow Monkeytype's own CSS variable names (the palettes in
+ * src/themes.ts are lifted from Monkeytype, GPL-3.0) so this file picks up
+ * whatever theme is applied at the document root. Fallback values keep the
+ * engine usable even if no theme has wired the variables yet.
+ */
+
+.scr-root {
+  position: relative;
+  font-family: var(--scr-font-family, "Roboto Mono", monospace);
+  font-size: var(--scr-font-size, 1.5rem);
+  line-height: 1.6;
+  color: var(--sub-color, #646669);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.scr-viewport {
+  position: relative;
+  overflow: hidden;
+  height: 4.8em;
+  scroll-behavior: auto;
+}
+
+.scr-text {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  width: 100%;
+}
+
+.scr-block {
+  display: contents;
+}
+
+.scr-word {
+  display: inline-flex;
+  flex: none;
+}
+
+.scr-char {
+  display: inline-block;
+  white-space: pre;
+  color: var(--sub-color, #646669);
+  transition: color 0.06s ease-out;
+}
+
+.scr-char--pending {
+  color: var(--sub-color, #646669);
+}
+
+.scr-char--correct {
+  color: var(--text-color, #d1d0c5);
+}
+
+.scr-char--corrected {
+  color: var(--text-color, #d1d0c5);
+  border-bottom: 2px dotted var(--main-color, #e2b714);
+}
+
+.scr-char--incorrect {
+  color: var(--error-color, #ca4754);
+}
+
+.scr-char--extra {
+  color: var(--error-extra-color, #7e2a33);
+}
+
+.scr-extras {
+  display: inline;
+}
+
+/* A source-block boundary is an explicit Enter target. It lives inside the
+ * final word wrapper so the pilcrow can never wrap onto a line by itself. */
+.scr-boundary {
+  display: inline-block;
+  margin-inline-start: 0;
+  color: var(--sub-color, #646669);
+  opacity: 0.45;
+  transition: color 0.06s ease-out;
+}
+
+.scr-boundary--correct {
+  color: var(--text-color, #d1d0c5);
+}
+
+.scr-boundary--incorrect {
+  color: var(--error-color, #ca4754);
+  opacity: 1;
+}
+
+/* This participates directly in .scr-text's wrapping context because
+ * .scr-block uses display: contents. It ends the physical source line
+ * without adding a character to Block.text or the canonical span index. */
+.scr-line-break {
+  flex: 0 0 100%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Caret ------------------------------------------------------------------ */
+
+.scr-caret {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0.1em;
+  height: 1.2em;
+  background: var(--caret-color, #e2b714);
+  border-radius: var(--roundness, 0.2em);
+  transform-origin: top left;
+  animation: scr-caret-flash 1s infinite;
+  pointer-events: none;
+}
+
+.scr-caret--smooth {
+  transition:
+    transform 0.09s ease-out,
+    width 0.09s ease-out;
+}
+
+.scr-caret--off {
+  display: none;
+}
+
+.scr-caret--block {
+  background: var(--caret-color, #e2b714);
+  opacity: 0.45;
+  animation: none;
+}
+
+.scr-caret--underline {
+  top: 0;
+  bottom: auto;
+  height: 0.1em;
+}
+
+@keyframes scr-caret-flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Hidden input ------------------------------------------------------------ */
+
+.scr-hidden-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  opacity: 0;
+  pointer-events: none;
+}

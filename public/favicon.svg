@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Scriptorium">
+  <rect width="512" height="512" rx="96" fill="#323437"/>
+  <path d="M112 116c54 0 101 13 144 48 43-35 90-48 144-48v270c-54 0-101 13-144 48-43-35-90-48-144-48V116Z" fill="#e2b714"/>
+  <path d="M256 164v270M144 169c39 2 70 11 92 26M144 219c39 2 70 11 92 26M144 269c39 2 70 11 92 26M368 169c-39 2-70 11-92 26M368 219c-39 2-70 11-92 26M368 269c-39 2-70 11-92 26" fill="none" stroke="#323437" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m306 330 18 18 42-44" fill="none" stroke="#323437" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

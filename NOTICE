@@ -1,0 +1,32 @@
+Scriptorium
+Copyright (C) 2026 Uzair Qadir
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+────────────────────────────────────────────────────────────────────────────
+
+This work is derived from Monkeytype.
+
+    Monkeytype — https://github.com/monkeytypegame/monkeytype
+    Copyright (C) Jack Kingsman and the Monkeytype contributors
+    Licensed under the GNU General Public License v3.0
+
+Material derived from Monkeytype in this repository:
+
+  * src/themes.ts — the 187 theme colour palettes, lifted from
+    frontend/src/ts/constants/themes.ts
+
+  * src/styles/ and src/engine/typing.css — CSS idioms for the caret, the
+    per-character text rendering, buttons and inputs, adapted from
+    frontend/src/styles/{core,caret,test,buttons,inputs,popups}.scss
+
+  * src/engine/ — the typing-test model (word-commit semantics, character
+    states, WPM/accuracy/consistency formulas) follows the approach taken in
+    frontend/src/ts/test/ and frontend/src/ts/utils/numbers.ts
+
+Scriptorium is not affiliated with or endorsed by Monkeytype. The EPUB
+ingestion pipeline, the book library, progress persistence and cross-device
+sync are original to this project.

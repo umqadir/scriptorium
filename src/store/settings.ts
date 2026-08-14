@@ -1,0 +1,102 @@
+/**
+ * Settings persistence. Source of truth is IndexedDB; a JSON mirror in
+ * localStorage lets the app apply a theme/font on first paint before the
+ * IndexedDB connection opens (avoids a flash of default styling).
+ */
+import { DEFAULT_SETTINGS, type Settings } from "../types";
+import { getDb, SETTINGS_KEY } from "./db";
+
+const LOCAL_STORAGE_KEY = "scriptorium:settings";
+
+const CARET_STYLES = new Set<Settings["caretStyle"]>(["line", "block", "underline", "off"]);
+const STOP_ON_ERROR_VALUES = new Set<Settings["stopOnError"]>(["off", "letter", "word"]);
+
+function isFiniteNumberInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+
+/**
+ * Fill in any missing/invalid fields with defaults. Pure function — this is
+ * what makes "settings load with defaults for missing fields" testable
+ * without touching IndexedDB: a settings record persisted by an older
+ * version of the app (missing newer fields) or corrupted in some way should
+ * never crash the app or leave `undefined`s floating around.
+ */
+export function mergeSettings(partial: Partial<Settings> | null | undefined): Settings {
+  if (!partial || typeof partial !== "object" || Array.isArray(partial)) {
+    return { ...DEFAULT_SETTINGS };
+  }
+
+  // Reconstruct the object field-by-field. Besides validating old/corrupt
+  // persisted values, this deliberately prevents unknown sync fields from
+  // being retained and later exported again.
+  return {
+    theme: typeof partial.theme === "string" ? partial.theme : DEFAULT_SETTINGS.theme,
+    fontFamily:
+      typeof partial.fontFamily === "string" ? partial.fontFamily : DEFAULT_SETTINGS.fontFamily,
+    // Match the reader control's supported range so corrupt persisted values
+    // cannot make the text unreadably small or large.
+    fontSize: isFiniteNumberInRange(partial.fontSize, 0.8, 3)
+      ? partial.fontSize
+      : DEFAULT_SETTINGS.fontSize,
+    caretStyle: CARET_STYLES.has(partial.caretStyle as Settings["caretStyle"])
+      ? (partial.caretStyle as Settings["caretStyle"])
+      : DEFAULT_SETTINGS.caretStyle,
+    smoothCaret:
+      typeof partial.smoothCaret === "boolean" ? partial.smoothCaret : DEFAULT_SETTINGS.smoothCaret,
+    stopOnError: STOP_ON_ERROR_VALUES.has(partial.stopOnError as Settings["stopOnError"])
+      ? (partial.stopOnError as Settings["stopOnError"])
+      : DEFAULT_SETTINGS.stopOnError,
+    foldAccents:
+      typeof partial.foldAccents === "boolean" ? partial.foldAccents : DEFAULT_SETTINGS.foldAccents,
+    soundOnClick:
+      typeof partial.soundOnClick === "boolean"
+        ? partial.soundOnClick
+        : DEFAULT_SETTINGS.soundOnClick,
+    showLiveWpm:
+      typeof partial.showLiveWpm === "boolean"
+        ? partial.showLiveWpm
+        : DEFAULT_SETTINGS.showLiveWpm,
+    contextLines:
+      Number.isInteger(partial.contextLines) &&
+      isFiniteNumberInRange(partial.contextLines, 0, 8)
+        ? partial.contextLines
+        : DEFAULT_SETTINGS.contextLines,
+  };
+}
+
+/** Synchronous best-effort read for first paint, before IndexedDB is open.
+ * Never throws; falls back to defaults if localStorage is unavailable
+ * (private browsing, disabled storage) or holds nothing/garbage yet. */
+export function getSettingsSync(): Settings {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    return mergeSettings(JSON.parse(raw) as Partial<Settings>);
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function mirrorToLocalStorage(settings: Settings): void {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // best-effort only; IndexedDB remains the source of truth
+  }
+}
+
+export async function getSettings(): Promise<Settings> {
+  const db = await getDb();
+  const stored = await db.get("settings", SETTINGS_KEY);
+  const settings = mergeSettings(stored);
+  mirrorToLocalStorage(settings);
+  return settings;
+}
+
+export async function saveSettings(settings: Settings): Promise<void> {
+  const full = mergeSettings(settings);
+  const db = await getDb();
+  await db.put("settings", full, SETTINGS_KEY);
+  mirrorToLocalStorage(full);
+}
