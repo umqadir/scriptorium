@@ -101,4 +101,5 @@ the character spans that changed are mutated.
 
 GPL-3.0. Derived from [Monkeytype](https://github.com/monkeytypegame/monkeytype),
 also GPL-3.0 — see [NOTICE](NOTICE) for exactly what was borrowed. Not affiliated
-with or endorsed by Monkeytype.
+with or endorsed by Monkeytype. The rolling book-lesson flow is inspired by
+[Keybr](https://github.com/aradzie/keybr.com); no Keybr source code is included.

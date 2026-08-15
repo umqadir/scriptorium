@@ -11,7 +11,15 @@ import {
   resolveSections,
   saveProgress,
 } from "../store/progress";
-import type { BookProgress, ParsedBook, Position, Section, SessionStats } from "../types";
+import {
+  MAX_VISIBLE_LINE_COUNT,
+  MIN_VISIBLE_LINE_COUNT,
+  type BookProgress,
+  type ParsedBook,
+  type Position,
+  type Section,
+  type SessionStats,
+} from "../types";
 import { clear, el, formatDuration, formatPercent } from "./dom";
 import { icons, iconSpan } from "./icons";
 import { navigate } from "./router";
@@ -123,7 +131,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let chooser: HTMLElement | null = null;
   let lifetimeFinalized = false;
   let finalStats: SessionStats | undefined;
-  let segmentTotals: SessionTotals = { ...EMPTY_TOTALS };
+  let routeTotals: SessionTotals = { ...EMPTY_TOTALS };
   let peakWpm = 0;
   let saveChain: Promise<void> = Promise.resolve();
   let chooserResumePosition: Position | undefined;
@@ -169,6 +177,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let statsEl: HTMLElement;
   let typingHost: HTMLElement;
   let hintEl: HTMLElement;
+  let lineCountSelectEl: HTMLSelectElement;
   let latestStats: SessionStats | undefined;
 
   const updateChrome = (
@@ -190,27 +199,52 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     }
   };
 
-  const addSegment = (stats: SessionStats): void => {
-    segmentTotals = {
-      charsTyped: segmentTotals.charsTyped + stats.charsTyped,
-      errors: segmentTotals.errors + stats.errors,
-      timeMs: segmentTotals.timeMs + stats.elapsedMs,
+  const addRunToRouteTotals = (stats: SessionStats): void => {
+    routeTotals = {
+      charsTyped: routeTotals.charsTyped + stats.charsTyped,
+      errors: routeTotals.errors + stats.errors,
+      timeMs: routeTotals.timeMs + stats.elapsedMs,
       consistencyTimeTotal:
-        segmentTotals.consistencyTimeTotal + stats.consistency * stats.elapsedMs,
+        routeTotals.consistencyTimeTotal + stats.consistency * stats.elapsedMs,
     };
     peakWpm = Math.max(peakWpm, stats.wpm);
   };
 
-  const stopCurrentSegment = (): { position: Position; stats: SessionStats } | undefined => {
+  const commitRun = (
+    stats: SessionStats,
+    position: Position,
+    charsCompleted: number
+  ): void => {
+    if (!progress || stats.charsTyped === 0) return;
+    addRunToRouteTotals(stats);
+    progress = applyProgressUpdate(progress, {
+      position,
+      charsCompleted,
+      wpm: stats.wpm,
+    });
+    progress = accumulateLifetime(progress, {
+      charsTyped: stats.charsTyped,
+      errors: stats.errors,
+      timeMs: stats.elapsedMs,
+    });
+    // Each immutable lesson/partial run is durable independently. Later
+    // route finalization updates position only and must never re-add it.
+    queueSave(progress);
+  };
+
+  const stopCurrentRun = (): { position: Position; stats: SessionStats } | undefined => {
     const current = session;
     if (!current) return undefined;
     sessionGeneration += 1;
     current.pause();
     const position = current.getPosition();
     const stats = current.getStats();
-    if (stats.charsTyped > 0) addSegment(stats);
     if (runtimeBook && progress) {
-      persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
+      const charsCompleted = charsAtPosition(runtimeBook, position);
+      if (stats.charsTyped > 0) {
+        commitRun(stats, position, charsCompleted);
+        latestStats = stats;
+      } else persistProgress(position, charsCompleted, stats.wpm);
     }
     current.destroy();
     session = null;
@@ -220,8 +254,8 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   const finalizeLifetime = (completed: boolean): SessionStats => {
     if (lifetimeFinalized && finalStats) return finalStats;
 
-    const stopped = stopCurrentSegment();
-    const combined = statsFromTotals(segmentTotals);
+    const stopped = stopCurrentRun();
+    const combined = statsFromTotals(routeTotals);
     peakWpm = Math.max(peakWpm, combined.wpm);
     finalStats = combined;
     lifetimeFinalized = true;
@@ -236,15 +270,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         charsCompleted,
         wpm: peakWpm,
       });
-      // Merely opening and closing a book is not a typing session. Once at
-      // least one key was recorded, fold the aggregate exactly once.
-      if (combined.charsTyped > 0) {
-        progress = accumulateLifetime(progress, {
-          charsTyped: combined.charsTyped,
-          errors: combined.errors,
-          timeMs: combined.elapsedMs,
-        });
-      }
       queueSave(progress);
       if (!cancelled) updateChrome(position, charsCompleted, combined);
     }
@@ -339,9 +364,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     overlayInterruptedSession = false;
     if (showPausedResults && interrupted && !lifetimeFinalized) {
       const hasScoredActivity =
-        segmentTotals.charsTyped !== 0 ||
-        segmentTotals.errors !== 0 ||
-        segmentTotals.timeMs !== 0;
+        routeTotals.charsTyped !== 0 ||
+        routeTotals.errors !== 0 ||
+        routeTotals.timeMs !== 0;
       if (hasScoredActivity) {
         renderSessionResults();
       } else if (chooserResumePosition && runtimeBook) {
@@ -377,23 +402,23 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
       onStats: (stats) => {
         if (cancelled || generation !== sessionGeneration) return;
-        peakWpm = Math.max(peakWpm, stats.wpm);
-        updateChrome(created.getPosition(), charsAtPosition(runtimeBook!, created.getPosition()), stats);
+        // A fresh lesson is intentionally idle. Retain the previous result
+        // until this run has both real input and measurable active time.
+        const displayStats =
+          stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats;
+        if (!displayStats) return;
+        peakWpm = Math.max(peakWpm, displayStats.wpm);
+        const position = created.getPosition();
+        updateChrome(position, charsAtPosition(runtimeBook!, position), displayStats);
       },
-      onBlockComplete: (stats, position) => {
+      onLessonComplete: (stats, position) => {
         if (cancelled || generation !== sessionGeneration) return;
-        // The engine resets immediately after this immutable snapshot. Fold
-        // it once into route totals and retain it visually until the next
-        // block receives real input.
-        addSegment(stats);
+        // The engine has already mounted the next finite lesson and reset its
+        // clock/counters. Persist this immutable result once, and keep it in
+        // the chrome while the new lesson remains idle.
+        commitRun(stats, position, charsAtPosition(runtimeBook!, position));
         latestStats = stats;
-        persistProgress(position, charsAtPosition(runtimeBook!, position), stats.wpm);
         updateChrome(position, charsAtPosition(runtimeBook!, position), stats);
-        queueMicrotask(() => {
-          if (cancelled || generation !== sessionGeneration || !session) return;
-          const nextPosition = created.getPosition();
-          updateChrome(nextPosition, charsAtPosition(runtimeBook!, nextPosition), latestStats);
-        });
       },
       onSectionComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
@@ -452,7 +477,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   const applySectionChoices = (choices: Map<string, boolean>): void => {
     if (!storedBook || !progress) return;
     const wasFinalized = lifetimeFinalized;
-    const stopped = stopCurrentSegment();
+    const stopped = stopCurrentRun();
     let updated = progress;
     for (const section of storedBook.sections) {
       const selected = choices.get(section.id) ?? section.included;
@@ -494,7 +519,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (wasFinalized) {
       lifetimeFinalized = false;
       finalStats = undefined;
-      segmentTotals = { ...EMPTY_TOTALS };
+      routeTotals = { ...EMPTY_TOTALS };
       latestStats = undefined;
       peakWpm = 0;
     }
@@ -535,7 +560,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (wasFinalized) {
       lifetimeFinalized = false;
       finalStats = undefined;
-      segmentTotals = { ...EMPTY_TOTALS };
+      routeTotals = { ...EMPTY_TOTALS };
       latestStats = undefined;
       peakWpm = 0;
     }
@@ -546,7 +571,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   function openContents(returnFocus = document.activeElement as HTMLElement | null): void {
     if (!runtimeBook || !progress || chooser) return;
-    const stopped = stopCurrentSegment();
+    const stopped = stopCurrentRun();
     const currentPosition = stopped?.position ?? pausedPosition ?? progress.position;
     if (stopped) pausedPosition = stopped.position;
     chooserResumePosition = currentPosition;
@@ -658,7 +683,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     inheritedInterruption = false
   ): void {
     if (!storedBook || !progress || chooser) return;
-    const stopped = stopCurrentSegment();
+    const stopped = stopCurrentRun();
     chooserResumePosition = stopped?.position ?? pausedPosition;
     if (stopped) pausedPosition = stopped.position;
     overlayInterruptedSession = stopped !== undefined || inheritedInterruption;
@@ -759,8 +784,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   const renderSessionResults = (): void => {
     if (!runtimeBook || !progress || cancelled) return;
-    const stats = statsFromTotals(segmentTotals);
-    latestStats = stats;
+    const stats = statsFromTotals(routeTotals);
     clear(typingHost);
     shell.classList.remove("reader-focused");
     typingHost.appendChild(
@@ -828,7 +852,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   const pauseSession = (): void => {
     if (!session) return;
-    pausedPosition = stopCurrentSegment()?.position;
+    pausedPosition = stopCurrentRun()?.position;
     renderSessionResults();
   };
 
@@ -892,9 +916,51 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
     });
     hintEl = el("p", { className: "reader-hint" }, ACTIVE_READER_HINT);
+    lineCountSelectEl = el(
+      "select",
+      {
+        className: "reader-line-count-select",
+        attrs: {
+          "aria-label": "Visible lines",
+          title: "Visible lines",
+        },
+        value: String(getAppState().settings.contextLines),
+        on: {
+          change: (event: Event) => {
+            const select = event.currentTarget as HTMLSelectElement;
+            const contextLines = Number(select.value);
+            if (
+              !Number.isInteger(contextLines) ||
+              contextLines < MIN_VISIBLE_LINE_COUNT ||
+              contextLines > MAX_VISIBLE_LINE_COUNT
+            ) {
+              select.value = String(getAppState().settings.contextLines);
+              return;
+            }
+            void getAppState().updateSettings({ contextLines }).catch((error: unknown) => {
+              console.error("Failed to save visible line count", error);
+              if (!cancelled) showToast("Couldn't save the visible line count.", "error");
+            });
+          },
+        },
+      },
+      ...Array.from(
+        { length: MAX_VISIBLE_LINE_COUNT - MIN_VISIBLE_LINE_COUNT + 1 },
+        (_, offset) => {
+          const count = MIN_VISIBLE_LINE_COUNT + offset;
+          return el("option", { attrs: { value: String(count) } }, `${count} lines`);
+        }
+      )
+    );
+    // Set after options exist: assigning a select's value before appending
+    // options falls back to the first option in some DOM implementations.
+    lineCountSelectEl.value = String(getAppState().settings.contextLines);
     const chrome = el(
       "div",
-      { className: "reader-chrome" },
+      {
+        className: "reader-chrome",
+        on: { focusin: () => shell.classList.remove("reader-focused") },
+      },
       el(
         "div",
         { className: "reader-topbar" },
@@ -916,6 +982,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         el(
           "div",
           { className: "reader-actions reader-topbar-trailing" },
+          el(
+            "label",
+            { className: "reader-line-count-control" },
+            el("span", { className: "visually-hidden" }, "Visible lines"),
+            lineCountSelectEl
+          ),
           el(
             "button",
             {
@@ -1033,6 +1105,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       unsubscribeSettings = getAppState().subscribe((settings) => {
         if (cancelled) return;
         session?.applySettings(settings);
+        lineCountSelectEl.value = String(settings.contextLines);
         statsEl.hidden =
           !settings.showLiveWpm || !latestStats || latestStats.charsTyped === 0;
       });

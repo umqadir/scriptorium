@@ -26,6 +26,9 @@ import {
   normalizePosition,
   findNextBlock,
   findPreviousBlock,
+  buildCanonicalNonSpaceIndex,
+  canonicalNonSpaceCharsAt,
+  type CanonicalNonSpaceIndex,
 } from "./text-model";
 import {
   createBlockState,
@@ -64,8 +67,11 @@ export type TypingSessionOptions = {
   onProgress?: (position: Position, charsCompleted: number) => void;
   /** Fires ~4x/sec while typing, for the live WPM/accuracy readout. */
   onStats?: (stats: SessionStats) => void;
-  /** Fires once per completed source block. For non-final blocks the
-   * successful Enter is included; the final block fires before book complete. */
+  /** Fires at each rolling lesson checkpoint. The immutable stats contain
+   * the boundary key; position is already the mounted next-lesson start. */
+  onLessonComplete?: (stats: SessionStats, position: Position) => void;
+  /** @deprecated Use onLessonComplete. Retained as a fallback callback so
+   * existing integrations do not silently lose completed-run stats. */
   onBlockComplete?: (stats: SessionStats, position: Position) => void;
   onSectionComplete?: (sectionIndex: number) => void;
   onBookComplete?: () => void;
@@ -74,15 +80,19 @@ export type TypingSessionOptions = {
 const PROGRESS_DEBOUNCE_MS = 1000;
 const SAMPLE_INTERVAL_MS = 1000;
 const STATS_INTERVAL_MS = 250;
+export const LESSON_TARGET_NON_SPACE_CHARS = 100;
 
 export class TypingSession {
   private readonly opts: TypingSessionOptions;
   private readonly book: ParsedBook;
   private readonly container: HTMLElement;
+  private readonly canonicalNonSpaceIndex: CanonicalNonSpaceIndex;
   private settings: Settings;
 
   private position: Position;
-  private sessionStartPosition: Position;
+  /** Exact canonical floor for the active discrete lesson. */
+  private lessonStartPosition: Position;
+  private lessonStartNonSpaceChars: number;
 
   private readonly blockStates = new Map<string, BlockState>();
   private dom: DomRefs | null = null;
@@ -129,6 +139,7 @@ export class TypingSession {
     this.container = opts.container;
     this.settings = opts.settings;
     this.clock = new SessionClock();
+    this.canonicalNonSpaceIndex = buildCanonicalNonSpaceIndex(this.book);
 
     const start = opts.startAt ?? {
       sectionIndex: firstIncludedSectionIndex(this.book),
@@ -136,7 +147,8 @@ export class TypingSession {
       charIndex: 0,
     };
     this.position = normalizePosition(this.book, start);
-    this.sessionStartPosition = this.position;
+    this.lessonStartPosition = this.position;
+    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(this.position);
     this.finished = !hasTypeableContent(this.book);
     this.initializeResumeState(this.position);
   }
@@ -241,7 +253,9 @@ export class TypingSession {
     // transient boundary extras are not part of Position and must not leak.
     this.boundaryErrors.clear();
     this.position = normalized;
-    this.sessionStartPosition = normalized;
+    this.resetLessonScore();
+    this.lessonStartPosition = normalized;
+    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(normalized);
     this.finished = !hasTypeableContent(this.book);
     this.initializeResumeState(normalized);
     if (!this.finished && !this.pausedExplicitly) this.clock.resume();
@@ -478,6 +492,7 @@ export class TypingSession {
     if (!block) return;
     const text = block.text;
     let charIndex = this.position.charIndex;
+    let committedNaturalWordBoundary = false;
     if (charIndex >= text.length) {
       // The visible pilcrow is a dedicated Enter target, not a canonical
       // character. Printable input at the boundary is still an error but
@@ -509,6 +524,7 @@ export class TypingSession {
         this.setChar(sectionIndex, blockIndex, charIndex, "correct");
         this.recordKeystroke(true);
         charIndex += 1;
+        committedNaturalWordBoundary = true;
       } else {
         if (this.settings.stopOnError === "letter") {
           this.recordKeystroke(false);
@@ -548,7 +564,9 @@ export class TypingSession {
     if (charIndex >= text.length) {
       this.onBlockTextComplete();
     } else {
-      this.updateCaret();
+      const checkpointed =
+        committedNaturalWordBoundary && this.maybeEmitLessonCheckpoint();
+      if (!checkpointed) this.updateCaret();
     }
   }
 
@@ -589,8 +607,8 @@ export class TypingSession {
     this.recordKeystroke(true);
     this.setBoundaryState(sectionIndex, blockIndex, "correct");
     this.boundaryErrors.delete(blockKey(sectionIndex, blockIndex));
-    this.emitBlockCheckpoint();
     this.advancePastBoundary(next);
+    this.maybeEmitLessonCheckpoint();
     this.scheduleProgressSave();
   }
 
@@ -634,6 +652,9 @@ export class TypingSession {
 
   private performBackspaceStep(): void {
     const { sectionIndex, blockIndex, charIndex } = this.position;
+    if (this.isAtOrBeforeLessonStart(sectionIndex, blockIndex, charIndex)) {
+      return;
+    }
     const block = this.getBlock(sectionIndex, blockIndex);
     if (!block) return;
     const text = block.text;
@@ -671,7 +692,7 @@ export class TypingSession {
     // charIndex === 0 and wordStart === 0: only the previous block's last
     // word can be crossed into.
     const prevLoc = findPreviousBlock(this.book, sectionIndex, blockIndex);
-    if (!prevLoc || this.isBeforeSessionStart(prevLoc)) return;
+    if (!prevLoc || this.isBlockBeforeLessonStart(prevLoc)) return;
     const prevBlock = this.getBlock(prevLoc.sectionIndex, prevLoc.blockIndex);
     if (!prevBlock) return;
     const prevText = prevBlock.text;
@@ -760,23 +781,52 @@ export class TypingSession {
       return;
     }
 
-    this.emitBlockCheckpoint();
-    this.opts.onSectionComplete?.(sectionIndex);
+    // Mark the session terminal before exposing the final lesson callback so
+    // a re-entrant consumer cannot type into an already-completed book.
     this.finished = true;
+    this.emitLessonCheckpoint(true);
+    this.opts.onSectionComplete?.(sectionIndex);
     this.clock.pause();
     this.stopActivityTimers();
     this.flushProgressSave();
     this.opts.onBookComplete?.();
   }
 
-  private emitBlockCheckpoint(): void {
-    // Freeze the completed run before notifying consumers. Resetting also
-    // stops live-stat/sample callbacks, preventing a zero-stat flash while
-    // the reader waits at the next block's caret.
+  private maybeEmitLessonCheckpoint(): boolean {
+    return this.emitLessonCheckpoint(false);
+  }
+
+  private emitLessonCheckpoint(force: boolean): boolean {
+    const nonSpaceChars =
+      this.nonSpaceCharsAt(this.position) - this.lessonStartNonSpaceChars;
+    if (!force && nonSpaceChars < LESSON_TARGET_NON_SPACE_CHARS) return false;
+    // Do not generate empty results after a threshold checkpoint happens to
+    // coincide with the final canonical boundary.
+    if (this.totalKeystrokes === 0) return false;
+
+    // Freeze the completed run, then install the next lesson before notifying
+    // consumers. This mirrors Keybr's discrete LessonState handoff: callbacks
+    // observe fresh zero stats, an idle clock, and already-mounted next text,
+    // while the argument remains the immutable completed snapshot.
     this.clock.pause();
     this.stopActivityTimers();
-    const stats = this.getStats();
-    this.opts.onBlockComplete?.(stats, this.getPosition());
+    const stats = Object.freeze(this.getStats());
+    const position = this.getPosition();
+    this.resetLessonScore();
+    this.lessonStartPosition = position;
+    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(position);
+    if (this.started && this.dom) {
+      this.rebuildRenderWindow();
+      this.dom.viewportEl.scrollTop = 0;
+      this.updateCaret();
+    }
+    const callback = this.opts.onLessonComplete ?? this.opts.onBlockComplete;
+    callback?.(stats, position);
+    return true;
+  }
+
+  private resetLessonScore(): void {
+    this.stopActivityTimers();
     this.totalKeystrokes = 0;
     this.correctKeystrokes = 0;
     this.keystrokesThisSecond = 0;
@@ -881,38 +931,64 @@ export class TypingSession {
     return isBefore ? "correct" : "pending";
   }
 
-  private isBeforeSessionStart(loc: {
+  private isBlockBeforeLessonStart(loc: {
     sectionIndex: number;
     blockIndex: number;
   }): boolean {
-    const s = this.sessionStartPosition;
+    const s = this.lessonStartPosition;
     if (loc.sectionIndex !== s.sectionIndex) return loc.sectionIndex < s.sectionIndex;
     return loc.blockIndex < s.blockIndex;
+  }
+
+  private isAtOrBeforeLessonStart(
+    sectionIndex: number,
+    blockIndex: number,
+    charIndex: number,
+  ): boolean {
+    const start = this.lessonStartPosition;
+    if (sectionIndex !== start.sectionIndex) return sectionIndex < start.sectionIndex;
+    if (blockIndex !== start.blockIndex) return blockIndex < start.blockIndex;
+    return charIndex <= start.charIndex;
   }
 
   private collectWindowBlocks(): RenderedBlock[] {
     const result: RenderedBlock[] = [];
     if (!hasTypeableContent(this.book)) return result;
 
-    // Render the current EPUB section as one stable flow. Chapters are the
-    // natural bounded unit for books, and keeping the section mounted means
-    // line wrapping cannot change at paragraph/verse boundaries. The parser
-    // already splits oversized source paragraphs, while section changes are
-    // an appropriate point for a fresh three-line window.
+    // Render the active lesson suffix of the current EPUB section. A rolling
+    // checkpoint may begin inside a long prose block; startCharIndex hides
+    // the completed lesson without changing any canonical span keys.
     const section = this.book.sections[this.position.sectionIndex];
     if (!section?.included) return result;
+    const startsInThisSection =
+      this.lessonStartPosition.sectionIndex === this.position.sectionIndex;
+    const firstBlockIndex = startsInThisSection
+      ? this.lessonStartPosition.blockIndex
+      : 0;
     for (const [blockIndex, block] of section.blocks.entries()) {
       if (block.text.length === 0) continue;
+      if (blockIndex < firstBlockIndex) continue;
       result.push({
         sectionIndex: this.position.sectionIndex,
         blockIndex,
         block,
+        startCharIndex:
+          startsInThisSection && blockIndex === firstBlockIndex
+            ? getWordStart(block.text, this.lessonStartPosition.charIndex)
+            : 0,
         hasBoundary:
           findNextBlock(this.book, this.position.sectionIndex, blockIndex) !== null,
       });
     }
 
     return result;
+  }
+
+  /** Absolute non-space canonical character count before `position`.
+   * Deriving lesson length from Position keeps wrong keys and Backspace from
+   * incrementally corrupting checkpoint accounting. */
+  private nonSpaceCharsAt(position: Position): number {
+    return canonicalNonSpaceCharsAt(this.canonicalNonSpaceIndex, position);
   }
 
   private rebuildRenderWindow(): void {

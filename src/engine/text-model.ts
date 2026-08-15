@@ -7,6 +7,50 @@
 
 import type { ParsedBook, Position } from "../types";
 
+export type CanonicalNonSpaceIndex = ReadonlyArray<
+  ReadonlyArray<{ base: number; prefix: Uint32Array } | null>
+>;
+
+/** Build an immutable-position lookup for rolling lesson length. Excluded
+ * sections contribute no characters; empty included blocks retain the same
+ * absolute base as the next typeable block. Construction is O(book chars),
+ * while every subsequent Position lookup is O(1). */
+export function buildCanonicalNonSpaceIndex(
+  book: ParsedBook,
+): CanonicalNonSpaceIndex {
+  let absoluteCount = 0;
+  return book.sections.map((section) =>
+    section.blocks.map((block) => {
+      if (!section.included) return null;
+      const prefix = new Uint32Array(block.text.length + 1);
+      for (let i = 0; i < block.text.length; i++) {
+        prefix[i + 1] = prefix[i]! + (block.text[i] === " " ? 0 : 1);
+      }
+      const entry = { base: absoluteCount, prefix };
+      absoluteCount += prefix[prefix.length - 1]!;
+      return entry;
+    }),
+  );
+}
+
+/** Absolute count of included, canonical non-space characters before a
+ * normalized Position. */
+export function canonicalNonSpaceCharsAt(
+  index: CanonicalNonSpaceIndex,
+  position: Position,
+): number {
+  const entry = index[position.sectionIndex]?.[position.blockIndex];
+  if (!entry) return 0;
+  const charIndex = Math.min(
+    entry.prefix.length - 1,
+    Math.max(
+      0,
+      Number.isFinite(position.charIndex) ? Math.floor(position.charIndex) : 0,
+    ),
+  );
+  return entry.base + entry.prefix[charIndex]!;
+}
+
 function nonNegativeInteger(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);

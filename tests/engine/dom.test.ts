@@ -134,6 +134,60 @@ describe("renderWindow", () => {
     ).toBe("first linesecond line");
   });
 
+  test("renders a partial lesson block with canonical indices, extras keys, and pilcrow", () => {
+    const host = document.createElement("div");
+    const requestedWordStarts: number[] = [];
+    const refs = renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 2,
+          blockIndex: 4,
+          block: { kind: "paragraph", text: "zero one two" },
+          startCharIndex: 5,
+          hasBoundary: true,
+        },
+      ],
+      () => "pending",
+      (_sectionIndex, _blockIndex, wordStart) => {
+        requestedWordStarts.push(wordStart);
+        return [];
+      },
+    );
+
+    expect(
+      [...host.querySelectorAll<HTMLElement>(".scr-char")]
+        .map((span) => span.textContent)
+        .join(""),
+    ).toBe("one two");
+    expect(refs.spanIndex.has("2:4:4")).toBe(false);
+    expect(refs.spanIndex.get("2:4:5")?.textContent).toBe("o");
+    expect(refs.spanIndex.get("2:4:11")?.textContent).toBe("o");
+    expect(requestedWordStarts).toEqual([5, 9]);
+    expect(refs.boundaryIndex.get("2:4")?.textContent).toBe("¶");
+  });
+
+  test("keeps a boundary target when a partial block starts at canonical end", () => {
+    const host = document.createElement("div");
+    const refs = renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 0,
+          blockIndex: 0,
+          block: { kind: "verse", text: "line" },
+          startCharIndex: 4,
+          hasBoundary: true,
+        },
+      ],
+      () => "pending",
+      () => [],
+    );
+
+    expect(host.querySelectorAll(".scr-char")).toHaveLength(0);
+    expect(refs.boundaryIndex.get("0:0")?.textContent).toBe("¶");
+  });
+
   test("defines a centered capped grid with full-width wrapping block rows", () => {
     // happy-dom does not compute CSS Grid layout, so assert the stylesheet
     // contract directly and leave geometry to browser QA.

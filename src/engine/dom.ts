@@ -105,6 +105,8 @@ export type RenderedBlock = {
   sectionIndex: number;
   blockIndex: number;
   block: Block;
+  /** First canonical Block.text index to render for a lesson handoff. */
+  startCharIndex?: number;
   /** Whether another typeable block follows this one in reading order. */
   hasBoundary?: boolean;
 };
@@ -144,13 +146,26 @@ export function renderWindow(
   const boundaryIndex = new Map<string, HTMLSpanElement>();
   const blockElIndex = new Map<string, HTMLDivElement>();
 
-  for (const { sectionIndex, blockIndex, block, hasBoundary = false } of blocks) {
+  for (const {
+    sectionIndex,
+    blockIndex,
+    block,
+    startCharIndex = 0,
+    hasBoundary = false,
+  } of blocks) {
     const blockEl = document.createElement("div");
     blockEl.className = `scr-block scr-block--${block.kind}`;
     blockElIndex.set(blockKey(sectionIndex, blockIndex), blockEl);
 
     const text = block.text;
-    let wordStart = 0;
+    const renderStart = Math.min(
+      text.length,
+      Math.max(0, Number.isFinite(startCharIndex) ? Math.floor(startCharIndex) : 0),
+    );
+    // A resume can begin mid-word, while lesson checkpoints always begin
+    // just after a canonical delimiter. Either way, extras retain their
+    // canonical word-start key rather than being renumbered to the slice.
+    let wordStart = getCanonicalWordStart(text, renderStart);
     let wordEl = document.createElement("span");
     wordEl.className = "scr-word";
 
@@ -180,7 +195,7 @@ export function renderWindow(
       blockEl.appendChild(wordEl);
     };
 
-    for (let i = 0; i < text.length; i++) {
+    for (let i = renderStart; i < text.length; i++) {
       const ch = text[i]!;
       const span = document.createElement("span");
       span.className = `scr-char scr-char--${charStateOf(sectionIndex, blockIndex, i)}`;
@@ -204,6 +219,13 @@ export function renderWindow(
       }
     }
 
+    // A persisted position may be waiting exactly at a non-final block's
+    // pilcrow. Render that target even though no canonical chars remain.
+    if (renderStart === text.length && hasBoundary) {
+      wordEl.classList.add("scr-word--block-end");
+      finishWord(undefined, true);
+    }
+
     if (hasBoundary) {
       const lineBreakEl = document.createElement("span");
       lineBreakEl.className = "scr-line-break";
@@ -215,6 +237,11 @@ export function renderWindow(
   }
 
   return { spanIndex, extrasIndex, boundaryIndex, blockElIndex };
+}
+
+function getCanonicalWordStart(text: string, index: number): number {
+  if (index <= 0) return 0;
+  return text.lastIndexOf(" ", index - 1) + 1;
 }
 
 function makeExtraSpan(ch: string): HTMLSpanElement {

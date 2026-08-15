@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { normalizePosition } from "../../src/engine/text-model";
+import {
+  buildCanonicalNonSpaceIndex,
+  canonicalNonSpaceCharsAt,
+  normalizePosition,
+} from "../../src/engine/text-model";
 import { makeBook } from "./helpers";
 
 describe("normalizePosition", () => {
@@ -54,5 +58,26 @@ describe("normalizePosition", () => {
     expect(
       normalizePosition(book, { sectionIndex: 99, blockIndex: 99, charIndex: 99 }),
     ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 0 });
+  });
+});
+
+describe("canonical non-space index", () => {
+  test("uses per-block prefix offsets while excluding skipped sections and empty text", () => {
+    const book = makeBook([
+      { id: "first", blocks: [{ text: "a b" }, { text: "" }] },
+      { id: "excluded", included: false, blocks: [{ text: "not counted" }] },
+      { id: "empty", blocks: [] },
+      { id: "last", blocks: [{ text: " c" }] },
+    ]);
+    const index = buildCanonicalNonSpaceIndex(book);
+
+    const countAt = (sectionIndex: number, blockIndex: number, charIndex: number) =>
+      canonicalNonSpaceCharsAt(index, { sectionIndex, blockIndex, charIndex });
+    expect(countAt(0, 0, 0)).toBe(0);
+    expect(countAt(0, 0, 2)).toBe(1);
+    expect(countAt(0, 0, 3)).toBe(2);
+    expect(countAt(0, 1, 0)).toBe(2);
+    expect(countAt(3, 0, 1)).toBe(2);
+    expect(countAt(3, 0, 2)).toBe(3);
   });
 });

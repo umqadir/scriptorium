@@ -302,60 +302,145 @@ describe("explicit block boundaries", () => {
     session.destroy();
   });
 
-  test("scores each source block independently and excludes idle time at the next caret", () => {
+  test("accumulates short blocks until an Enter boundary reaches the lesson target", () => {
     vi.useFakeTimers();
-    const checkpoints = vi.fn();
+    const lessons = vi.fn();
     const onBookComplete = vi.fn();
     const book = makeBook([
-      { id: "ch1", blocks: [{ text: "ab" }, { text: "cd" }] },
+      {
+        id: "ch1",
+        blocks: [
+          { text: "a".repeat(20) },
+          { text: "b".repeat(20) },
+          { text: "c".repeat(20) },
+          { text: "d".repeat(20) },
+          { text: "e".repeat(20) },
+          { text: "tail" },
+        ],
+      },
     ]);
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings(),
-      onBlockComplete: checkpoints,
+      onLessonComplete: lessons,
       onBookComplete,
     });
     session.start();
     const input = getHiddenInput(container);
 
-    pressChar(input, "a");
-    vi.advanceTimersByTime(1_000);
-    pressChar(input, "b");
-    vi.advanceTimersByTime(1_000);
+    for (let blockIndex = 0; blockIndex < 4; blockIndex++) {
+      typeText(input, book.sections[0]!.blocks[blockIndex]!.text);
+      pressEnter(input);
+      expect(lessons).not.toHaveBeenCalled();
+    }
+    typeText(input, book.sections[0]!.blocks[4]!.text);
     pressEnter(input);
 
-    expect(checkpoints).toHaveBeenCalledTimes(1);
-    expect(checkpoints.mock.calls[0]?.[0]).toMatchObject({
-      charsTyped: 3,
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(lessons.mock.calls[0]?.[0]).toMatchObject({
+      charsTyped: 105,
       errors: 0,
       accuracy: 100,
-      elapsedMs: 2_000,
     });
-    expect(checkpoints.mock.calls[0]?.[1]).toEqual({
+    expect(lessons.mock.calls[0]?.[1]).toEqual({
       sectionIndex: 0,
-      blockIndex: 0,
-      charIndex: 2,
+      blockIndex: 5,
+      charIndex: 0,
     });
     expect(session.getStats()).toMatchObject({ charsTyped: 0, elapsedMs: 0 });
+    expect(container.querySelectorAll(".scr-block")).toHaveLength(1);
+    expect(container.querySelector(".scr-block")?.textContent).toBe("tail");
 
     vi.advanceTimersByTime(20_000);
     expect(session.getStats()).toMatchObject({ charsTyped: 0, elapsedMs: 0 });
-    pressChar(input, "c");
+    pressChar(input, "t");
     vi.advanceTimersByTime(1_000);
-    pressChar(input, "d");
+    typeText(input, "ail");
 
-    expect(checkpoints).toHaveBeenCalledTimes(2);
-    expect(checkpoints.mock.calls[1]?.[0]).toMatchObject({
-      charsTyped: 2,
+    expect(lessons).toHaveBeenCalledTimes(2);
+    expect(lessons.mock.calls[1]?.[0]).toMatchObject({
+      charsTyped: 4,
       errors: 0,
       accuracy: 100,
       elapsedMs: 1_000,
     });
     expect(onBookComplete).toHaveBeenCalledTimes(1);
     expect(onBookComplete.mock.invocationCallOrder[0]).toBeGreaterThan(
-      checkpoints.mock.invocationCallOrder[1]!,
+      lessons.mock.invocationCallOrder[1]!,
     );
+    session.destroy();
+  });
+
+  test("checkpoints long prose after the first post-target space and mounts zeroed next text", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const firstWord = "a".repeat(99);
+    const text = `${firstWord} bb tail`;
+    const completed: Array<{
+      stats: ReturnType<TypingSession["getStats"]>;
+      position: ReturnType<TypingSession["getPosition"]>;
+      liveStats: ReturnType<TypingSession["getStats"]>;
+      mountedText: string;
+      frozen: boolean;
+    }> = [];
+    const eventOrder: string[] = [];
+    const onBookComplete = vi.fn(() => eventOrder.push("book"));
+    let session!: TypingSession;
+    session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text }] }]),
+      container,
+      settings: makeSettings(),
+      onLessonComplete: (stats, position) => {
+        eventOrder.push("lesson");
+        completed.push({
+          stats,
+          position,
+          liveStats: session.getStats(),
+          mountedText: [...container.querySelectorAll<HTMLElement>(".scr-char")]
+            .map((span) => span.textContent)
+            .join(""),
+          frozen: Object.isFrozen(stats),
+        });
+      },
+      onBookComplete,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    typeText(input, firstWord);
+    pressChar(input, " ");
+    expect(completed).toHaveLength(0); // 99 non-space chars is still short.
+
+    pressChar(input, "x"); // wrong first b, then correct it.
+    pressBackspace(input);
+    pressChar(input, "b");
+    pressChar(input, "b");
+    vi.advanceTimersByTime(1_000);
+    pressChar(input, " ");
+
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({
+      stats: { charsTyped: 104, errors: 1, elapsedMs: 1_000 },
+      position: { sectionIndex: 0, blockIndex: 0, charIndex: 103 },
+      liveStats: { charsTyped: 0, errors: 0, elapsedMs: 0 },
+      mountedText: "tail",
+      frozen: true,
+    });
+
+    // The emitted lesson is an exact floor even though its final word has
+    // permanent error history that would normally allow cross-word deletion.
+    pressBackspace(input);
+    expect(session.getPosition().charIndex).toBe(103);
+    expect(session.getStats().charsTyped).toBe(0);
+
+    typeText(input, "tail");
+    expect(completed).toHaveLength(2);
+    expect(completed[1]?.stats).toMatchObject({ charsTyped: 4, errors: 0 });
+    expect(onBookComplete).toHaveBeenCalledTimes(1);
+    expect(eventOrder).toEqual(["lesson", "lesson", "book"]);
+    // The previous immutable snapshot is not changed by the next lesson.
+    expect(completed[0]?.stats).toMatchObject({ charsTyped: 104, errors: 1 });
     session.destroy();
   });
 
@@ -363,12 +448,12 @@ describe("explicit block boundaries", () => {
     const book = makeBook([
       { id: "ch1", blocks: [{ text: "a" }, { text: "b" }] },
     ]);
-    const onBlockComplete = vi.fn();
+    const onLessonComplete = vi.fn();
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings(),
-      onBlockComplete,
+      onLessonComplete,
     });
     session.start();
     const input = getHiddenInput(container);
@@ -403,10 +488,13 @@ describe("explicit block boundaries", () => {
       blockIndex: 1,
       charIndex: 0,
     });
-    // The completed run preserves its permanent error history, while the
-    // next block starts with fresh scoring counters.
-    expect(onBlockComplete.mock.calls[0]?.[0].errors).toBe(4);
-    expect(session.getStats().errors).toBe(0);
+    // A short source block is not a lesson by itself; its errors continue
+    // into the next block until the rolling lesson or final remainder ends.
+    expect(onLessonComplete).not.toHaveBeenCalled();
+    expect(session.getStats().errors).toBe(4);
+    pressChar(input, "b");
+    expect(onLessonComplete).toHaveBeenCalledTimes(1);
+    expect(onLessonComplete.mock.calls[0]?.[0].errors).toBe(4);
     session.destroy();
   });
 
@@ -476,8 +564,10 @@ describe("explicit block boundaries", () => {
       blockIndex: 2,
       charIndex: 1,
     });
-    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(2);
-    expect(container.querySelectorAll(".scr-line-break")).toHaveLength(2);
+    // Final completion mounts the terminal lesson suffix before callbacks;
+    // completed prior blocks and their boundaries are no longer in the DOM.
+    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(0);
+    expect(container.querySelectorAll(".scr-line-break")).toHaveLength(0);
     session.destroy();
   });
 
@@ -504,7 +594,7 @@ describe("explicit block boundaries", () => {
     });
     dispatchInput(input, "insertText", "b");
     expect(onBookComplete).toHaveBeenCalledTimes(1);
-    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(1);
+    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(0);
     session.destroy();
   });
 });
@@ -563,7 +653,7 @@ describe("stopOnError behaviour", () => {
     session.destroy();
   });
 
-  test("'word' mode gates a block's final word and completes only after correction", () => {
+  test("legacy onBlockComplete fallback receives the final lesson after word correction", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "cat" }] }]);
     let completed = 0;
     const onBlockComplete = vi.fn();
@@ -757,7 +847,7 @@ describe("position and settings", () => {
     session.destroy();
   });
 
-  test("resume renders completed source blocks as completed context", () => {
+  test("resume hides prior blocks but shows the active word prefix as completed context", () => {
     const book = makeBook([
       { id: "ch1", blocks: [{ text: "first" }, { text: "second" }] },
     ]);
@@ -770,17 +860,48 @@ describe("position and settings", () => {
 
     session.start();
     const blocks = container.querySelectorAll<HTMLElement>(".scr-block");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.textContent).toBe("second");
+    const chars = blocks[0]!.querySelectorAll(".scr-char");
+    expect(chars[0]?.classList).toContain("scr-char--correct");
+    expect(chars[1]?.classList).toContain("scr-char--correct");
+    expect(chars[2]?.classList).toContain("scr-char--pending");
+    session.destroy();
+  });
+
+  test("resume at a pilcrow shows the final word and keeps its exact deletion floor", () => {
+    const book = makeBook([
+      { id: "ch1", blocks: [{ text: "first word" }, { text: "next" }] },
+    ]);
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+      startAt: { sectionIndex: 0, blockIndex: 0, charIndex: 10 },
+    });
+
+    session.start();
+    const input = getHiddenInput(container);
+    const firstBlock = container.querySelector<HTMLElement>(".scr-block")!;
     expect(
-      [...blocks[0]!.querySelectorAll(".scr-char")].every((span) =>
-        span.classList.contains("scr-char--correct")
-      )
-    ).toBe(true);
+      [...firstBlock.querySelectorAll<HTMLElement>(".scr-char")]
+        .map((span) => span.textContent)
+        .join(""),
+    ).toBe("word");
     expect(
-      [...blocks[1]!.querySelectorAll(".scr-char")].slice(0, 2).every((span) =>
-        span.classList.contains("scr-char--correct")
-      )
+      [...firstBlock.querySelectorAll(".scr-char")].every((span) =>
+        span.classList.contains("scr-char--correct"),
+      ),
     ).toBe(true);
-    expect(blocks[1]!.querySelectorAll(".scr-char")[2]?.classList).toContain("scr-char--pending");
+    expect(firstBlock.querySelector(".scr-boundary")?.textContent).toBe("¶");
+
+    pressBackspace(input);
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 10,
+    });
+    expect(firstBlock.querySelector(".scr-boundary")?.textContent).toBe("¶");
     session.destroy();
   });
 

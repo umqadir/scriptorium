@@ -87,9 +87,9 @@ export class SessionClock {
     return this.accumulatedMs;
   }
 
-  /** Start a fresh score run without starting its timer. The next accepted
-   * key calls recordActivity(), so time spent reading at a new block's caret
-   * never leaks into that block's WPM. */
+  /** Start a fresh lesson score without starting its timer. The next accepted
+   * key calls recordActivity(), so time spent reading the next lesson never
+   * leaks into its WPM. */
   reset(): void {
     if (this.idleTimer !== null) {
       clearTimeout(this.idleTimer);

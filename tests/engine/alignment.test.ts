@@ -72,14 +72,14 @@ describe("alignment regression", () => {
 
     let sectionCompletions: number[] = [];
     let bookCompleted = 0;
-    const blockStats: SessionStats[] = [];
+    const lessonStats: SessionStats[] = [];
 
     const session = new TypingSession({
       book,
       container,
       settings: makeSettings(),
       onSectionComplete: (i) => sectionCompletions.push(i),
-      onBlockComplete: (stats) => blockStats.push(stats),
+      onLessonComplete: (stats) => lessonStats.push(stats),
       onBookComplete: () => {
         bookCompleted += 1;
       },
@@ -93,10 +93,12 @@ describe("alignment regression", () => {
       if (index < section.blocks.length - 1) pressEnter(input);
     }
 
-    expect(blockStats).toHaveLength(section.blocks.length);
-    expect(blockStats.every((stats) => stats.accuracy === 100)).toBe(true);
-    expect(blockStats.reduce((sum, stats) => sum + stats.errors, 0)).toBe(0);
-    expect(blockStats.reduce((sum, stats) => sum + stats.charsTyped, 0)).toBe(
+    const expectedLessons = expectedLessonCount(book);
+    expect(expectedLessons).toBe(19);
+    expect(lessonStats).toHaveLength(expectedLessons);
+    expect(lessonStats.every((stats) => stats.accuracy === 100)).toBe(true);
+    expect(lessonStats.reduce((sum, stats) => sum + stats.errors, 0)).toBe(0);
+    expect(lessonStats.reduce((sum, stats) => sum + stats.charsTyped, 0)).toBe(
       totalIncludedChars(book) + section.blocks.length - 1,
     );
 
@@ -160,7 +162,7 @@ describe("alignment regression", () => {
       book,
       container,
       settings: makeSettings(),
-      onBlockComplete: (stats) => {
+      onLessonComplete: (stats) => {
         finalStats = stats;
       },
     });
@@ -195,3 +197,34 @@ describe("alignment regression", () => {
     session.destroy();
   });
 });
+
+function expectedLessonCount(book: ReturnType<typeof makeBook>): number {
+  const blocks = book.sections
+    .filter((section) => section.included)
+    .flatMap((section) => section.blocks.filter((block) => block.text.length > 0));
+  let lessons = 0;
+  let nonSpaceChars = 0;
+  let runKeys = 0;
+
+  blocks.forEach((block, blockOrdinal) => {
+    for (const char of block.text) {
+      runKeys += 1;
+      if (char !== " ") nonSpaceChars += 1;
+      if (char === " " && nonSpaceChars >= 100) {
+        lessons += 1;
+        nonSpaceChars = 0;
+        runKeys = 0;
+      }
+    }
+    if (blockOrdinal < blocks.length - 1) {
+      runKeys += 1; // The explicit Enter belongs to the completed lesson.
+      if (nonSpaceChars >= 100) {
+        lessons += 1;
+        nonSpaceChars = 0;
+        runKeys = 0;
+      }
+    }
+  });
+
+  return lessons + (runKeys > 0 ? 1 : 0);
+}

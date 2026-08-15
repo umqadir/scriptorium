@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { DEFAULT_SETTINGS, type BookProgress, type ParsedBook } from "../../src/types";
 import { createInitialProgress } from "../../src/store/progress";
-import { initAppState } from "../../src/ui/state";
+import { getAppState, initAppState } from "../../src/ui/state";
 
 const storage = vi.hoisted(() => ({
   getBook: vi.fn(),
   getProgress: vi.fn(),
   saveProgress: vi.fn(async () => undefined),
+  saveSettings: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/store/books", async (importOriginal) => ({
@@ -22,6 +23,11 @@ vi.mock("../../src/store/progress", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/store/progress")>()),
   getProgress: storage.getProgress,
   saveProgress: storage.saveProgress,
+}));
+
+vi.mock("../../src/store/settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/store/settings")>()),
+  saveSettings: storage.saveSettings,
 }));
 
 import { mountReader } from "../../src/ui/reader";
@@ -62,6 +68,8 @@ describe("mountReader", () => {
     storage.getProgress.mockReset();
     storage.saveProgress.mockReset();
     storage.saveProgress.mockResolvedValue(undefined);
+    storage.saveSettings.mockReset();
+    storage.saveSettings.mockResolvedValue(undefined);
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false });
     location.hash = "#/reader/book-1";
   });
@@ -185,13 +193,65 @@ describe("mountReader", () => {
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
   });
 
-  test("keeps block runs independent in chrome and lifetime without interrupting between paragraphs", async () => {
-    vi.useFakeTimers();
-    const parsed = book("ab");
-    parsed.sections[0]!.blocks.push({ kind: "paragraph", text: "cd" });
-    parsed.sections[0]!.charCount = 4;
+  test("changes visible lines live without recreating or resetting the typing session", async () => {
+    const parsed = book("abc");
     storage.getBook.mockResolvedValue(stored(parsed));
-    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 4));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 3));
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+    const updateSettings = vi.spyOn(getAppState(), "updateSettings");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+    const root = host.querySelector<HTMLElement>(".scr-root")!;
+    const input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    await vi.waitFor(() =>
+      expect(host.querySelector(".scr-char--correct")?.textContent).toBe("a")
+    );
+    const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
+    await vi.waitFor(() => expect(liveStats.hidden).toBe(false));
+    const statsBefore = host.querySelector(".reader-live-stats")?.textContent;
+
+    const lineCount = host.querySelector<HTMLSelectElement>(".reader-line-count-select")!;
+    expect(lineCount.getAttribute("aria-label")).toBe("Visible lines");
+    expect(lineCount.options).toHaveLength(7);
+    expect(lineCount.value).toBe("3");
+    lineCount.focus();
+    expect(host.querySelector(".reader-shell")?.classList).not.toContain("reader-focused");
+    lineCount.value = "6";
+    lineCount.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(updateSettings).toHaveBeenCalledWith({ contextLines: 6 })
+    );
+    await vi.waitFor(() =>
+      expect(storage.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ contextLines: 6 })
+      )
+    );
+    expect(getAppState().settings.contextLines).toBe(6);
+    expect(host.querySelector(".scr-root")).toBe(root);
+    expect(host.querySelector(".scr-hidden-input")).toBe(input);
+    expect(root.style.getPropertyValue("--scr-viewport-height")).toBe("9.6em");
+    expect(host.querySelector(".scr-char--correct")?.textContent).toBe("a");
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(statsBefore);
+    expect(lineCount.value).toBe("6");
+    expect(document.activeElement).toBe(lineCount);
+    handle.unmount?.();
+    host.remove();
+    updateSettings.mockRestore();
+  });
+
+  test("persists two rolling lessons exactly once and keeps the latest score through idle handoff", async () => {
+    vi.useFakeTimers();
+    const text = Array.from(
+      { length: 21 },
+      (_, index) => String.fromCharCode("a".charCodeAt(0) + index).repeat(10)
+    ).join(" ");
+    const parsed = book(text);
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", text.length));
     const host = document.createElement("main");
     document.body.appendChild(host);
 
@@ -202,50 +262,82 @@ describe("mountReader", () => {
     const press = (key: string) =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
-    press("a");
+    // Ten ten-letter words plus their delimiters form the first 100-letter
+    // finite lesson. Give each lesson a distinct active duration so its WPM
+    // is observably independent from the idle gap and prior result.
+    press(text[0]!);
     await vi.advanceTimersByTimeAsync(1_000);
-    press("b");
-    await vi.advanceTimersByTimeAsync(1_000);
-    press("Enter");
+    for (let index = 1; index < 110; index += 1) press(text[index]!);
+
+    expect(host.querySelector(".reader-session-results")).toBeNull();
+    expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe("k");
+    const firstResult = host.querySelector(".reader-live-stats")?.textContent;
+    expect(firstResult).toContain("1320 wpm");
+
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    let snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(snapshots.some((snapshot) => snapshot.lifetime.sessions === 1)).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
+    press(text[110]!);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
+    await vi.advanceTimersByTimeAsync(2_000);
+    for (let index = 111; index < 220; index += 1) press(text[index]!);
 
     expect(host.querySelector(".reader-session-results")).toBeNull();
     expect(host.textContent).not.toContain("session paused");
-    expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
-    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe("u");
+    const secondResult = host.querySelector(".reader-live-stats")?.textContent;
+    expect(secondResult).toContain("660 wpm");
+    expect(secondResult).not.toBe(firstResult);
+
+    // A completed lesson is durable before route teardown (crash/reload
+    // boundary), not deferred until the whole reader session finishes.
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    const durableCheckpoint = [...snapshots].reverse().find(
+      (snapshot) => snapshot.lifetime.sessions === 2
+    );
+    expect(durableCheckpoint?.position).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 220,
+    });
+    expect(durableCheckpoint?.charsCompleted).toBe(220);
+    expect(durableCheckpoint?.lifetime).toEqual({
+      charsTyped: 220,
+      errors: 0,
+      timeMs: 3_000,
+      sessions: 2,
+    });
 
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
-    press("c");
-    // At the exact first-key instant elapsed time is zero, so retain the
-    // completed run rather than flashing a meaningless 0 WPM.
-    expect(host.querySelector(".reader-live-stats")?.textContent).toContain("18 wpm");
-    await vi.advanceTimersByTimeAsync(250);
-    const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
-    expect(liveStats.textContent).not.toContain("18 wpm");
-    expect(host.querySelector(".reader-shell")?.classList).toContain("reader-focused");
-    expect(liveStats.hidden).toBe(false);
-    expect(liveStats.closest(".reader-chrome")).toBeNull();
-    await vi.advanceTimersByTimeAsync(750);
-    press("d");
-
-    expect(host.textContent).toContain("book complete");
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(secondResult);
+    press(text[220]!);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(secondResult);
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle.unmount?.();
     handle.unmount?.();
     await vi.advanceTimersByTimeAsync(0);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
 
-    const snapshots = (
+    snapshots = (
       storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
     ).map(([snapshot]) => snapshot);
-    const withLifetime = snapshots.filter((snapshot) => snapshot.lifetime.sessions === 1);
-    expect(withLifetime.length).toBeGreaterThan(0);
-    const latest = withLifetime.at(-1)!;
+    const latest = snapshots.at(-1)!;
     expect(latest.lifetime).toEqual({
-      charsTyped: 5,
+      charsTyped: 221,
       errors: 0,
-      timeMs: 3_000,
-      sessions: 1,
+      timeMs: 4_000,
+      sessions: 3,
     });
-    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(3);
     host.remove();
   });
 
