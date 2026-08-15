@@ -26,14 +26,18 @@
 
 .scr-text {
   position: relative;
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  width: 100%;
+  display: grid;
+  grid-template-columns: auto;
+  align-content: start;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
 }
 
 .scr-block {
-  display: contents;
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .scr-word {
@@ -92,9 +96,10 @@
   opacity: 1;
 }
 
-/* This participates directly in .scr-text's wrapping context because
- * .scr-block uses display: contents. It ends the physical source line
- * without adding a character to Block.text or the canonical span index. */
+/* This ends the physical source line without adding a character to
+ * Block.text or the canonical span index. The containing .scr-block is
+ * already a grid row; retaining the break also makes that contract explicit
+ * if the layout display mode changes later. */
 .scr-line-break {
   flex: 0 0 100%;
   width: 0;

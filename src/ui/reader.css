@@ -331,10 +331,6 @@
     grid-area: trailing;
   }
 
-  .reader-workspace {
-    transform: translateY(-2.5rem);
-  }
-
   .reader-actions {
     gap: 0.2rem;
   }

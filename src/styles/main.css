@@ -868,11 +868,25 @@ fieldset {
   display: grid;
   /* Reserve the score row so toggling live WPM never shifts the text. */
   grid-template-rows: minmax(1.5rem, auto) auto auto;
-  align-content: center;
+  align-content: start;
   gap: 0.45rem;
-  /* Optical lift: centering the full three-line viewport otherwise places
-     its first glyph row below Monkeytype's measured reading axis. */
-  transform: translateY(-2.25rem);
+  /* Monkeytype fills this area with test controls. Scriptorium does not, so
+     anchor the reading surface beneath the chrome instead of centering it in
+     the otherwise empty page. */
+  padding-top: clamp(3.5rem, 10dvh, 5rem);
+}
+
+/* Uploaded material has natural line lengths rather than Monkeytype's dense
+   generated word rows. Center one readable column while keeping the text
+   itself left-aligned. */
+.reader-live-stats,
+.typing-container > .scr-root {
+  width: min(100%, 52rem);
+  margin-inline: auto;
+}
+
+.reader-live-stats {
+  justify-self: center;
 }
 
 .typing-container {

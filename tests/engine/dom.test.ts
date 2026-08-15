@@ -1,5 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
+// The project intentionally omits Node typings; this test-only import reads
+// the stylesheet because Vitest stubs CSS (`?inline`/`?raw`) to an empty string.
+// @ts-expect-error Node's runtime module is available to the Vitest process.
+import { readFileSync } from "node:fs";
 import { keepLineInView, positionCaret, renderWindow } from "../../src/engine/dom";
+
+const typingCss = readFileSync("src/engine/typing.css", "utf8");
 
 function rect(input: Partial<DOMRect>): DOMRect {
   return {
@@ -61,7 +67,7 @@ describe("renderWindow", () => {
     ).toBe("read this");
   });
 
-  test("keeps separate source blocks in one continuous word flow", () => {
+  test("keeps source blocks as aligned rows without changing canonical spans", () => {
     const host = document.createElement("div");
     renderWindow(
       host,
@@ -90,11 +96,28 @@ describe("renderWindow", () => {
     );
     expect(host.querySelector(".scr-word--block-end")?.textContent).toBe("line¶");
     expect(host.querySelectorAll(".scr-line-break")).toHaveLength(1);
+    const blocks = host.querySelectorAll<HTMLElement>(".scr-block");
+    expect([...blocks[0]!.children].filter((el) => el.classList.contains("scr-word"))).toHaveLength(2);
+    expect([...blocks[1]!.children].filter((el) => el.classList.contains("scr-word"))).toHaveLength(2);
     expect(
       [...host.querySelectorAll<HTMLElement>(".scr-char")]
         .map((span) => span.textContent)
         .join(""),
     ).toBe("first linesecond line");
+  });
+
+  test("defines a centered capped grid with full-width wrapping block rows", () => {
+    // happy-dom does not compute CSS Grid layout, so assert the stylesheet
+    // contract directly and leave geometry to browser QA.
+    expect(typingCss).toMatch(
+      /\.scr-text\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto;[^}]*width:\s*fit-content;[^}]*max-width:\s*100%;[^}]*margin-inline:\s*auto;/s,
+    );
+    expect(typingCss).toMatch(
+      /\.scr-block\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*min-width:\s*0;/s,
+    );
+    const blockRule = typingCss.match(/\.scr-block\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(blockRule).not.toMatch(/^\s*width\s*:/m);
+    expect(typingCss).toMatch(/\.scr-word\s*\{[^}]*flex:\s*none;/s);
   });
 });
 
