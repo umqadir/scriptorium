@@ -19,19 +19,16 @@
 
 .scr-viewport {
   position: relative;
-  overflow: hidden;
-  height: var(--scr-viewport-height, 4.8em);
-  scroll-behavior: auto;
+  overflow: visible;
+  height: auto;
 }
 
 .scr-text {
   position: relative;
-  display: grid;
-  grid-template-columns: auto;
-  align-content: start;
-  width: fit-content;
+  display: block;
+  width: 100%;
   max-width: 100%;
-  margin-inline: auto;
+  margin: 0;
 }
 
 .scr-block {

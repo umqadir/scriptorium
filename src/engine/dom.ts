@@ -2,14 +2,13 @@
  * DOM construction and low-level mutation helpers for the typing renderer.
  *
  * Performance contract: `renderWindow` is the only function that rebuilds
- * markup wholesale, and it is only called when the set of visible blocks
- * changes (i.e. on block/section transitions), never per keystroke.
+ * markup wholesale, and it is only called for lesson mount/handoff or
+ * explicit navigation, never per keystroke.
  * Per-keystroke updates go through `setCharClass` / `renderExtras`, which
  * mutate exactly the span(s) that changed.
  */
 
 import {
-  normalizeVisibleLineCount,
   type Block,
   type CaretStyle,
   type Settings,
@@ -83,11 +82,11 @@ export function applyFont(rootEl: HTMLElement, settings: Settings): void {
 
 export function applyVisibleLineCount(
   rootEl: HTMLElement,
-  value: unknown,
+  _value: unknown,
 ): void {
-  const lines = normalizeVisibleLineCount(value);
-  const heightEm = Number((lines * 1.6).toFixed(1));
-  rootEl.style.setProperty("--scr-viewport-height", `${heightEm}em`);
+  // Compatibility no-op for callers compiled against the former scrolling
+  // viewport. A finite lesson expands to its full wrapped height.
+  rootEl.style.removeProperty("--scr-viewport-height");
 }
 
 export function applyCaretStyle(
@@ -107,6 +106,8 @@ export type RenderedBlock = {
   block: Block;
   /** First canonical Block.text index to render for a lesson handoff. */
   startCharIndex?: number;
+  /** Exclusive canonical Block.text bound for this finite lesson. */
+  endCharIndex?: number;
   /** Whether another typeable block follows this one in reading order. */
   hasBoundary?: boolean;
 };
@@ -120,8 +121,7 @@ export type WindowRefs = {
   blockElIndex: Map<string, HTMLDivElement>;
 };
 
-/** Rebuild the visible window of blocks. Called only on block/section
- * transitions (or settings changes affecting layout), never per keystroke. */
+/** Rebuild the finite lesson fragment, never as a per-keystroke update. */
 export function renderWindow(
   textEl: HTMLElement,
   blocks: RenderedBlock[],
@@ -151,6 +151,7 @@ export function renderWindow(
     blockIndex,
     block,
     startCharIndex = 0,
+    endCharIndex = block.text.length,
     hasBoundary = false,
   } of blocks) {
     const blockEl = document.createElement("div");
@@ -161,6 +162,13 @@ export function renderWindow(
     const renderStart = Math.min(
       text.length,
       Math.max(0, Number.isFinite(startCharIndex) ? Math.floor(startCharIndex) : 0),
+    );
+    const renderEnd = Math.min(
+      text.length,
+      Math.max(
+        renderStart,
+        Number.isFinite(endCharIndex) ? Math.floor(endCharIndex) : text.length,
+      ),
     );
     // A resume can begin mid-word, while lesson checkpoints always begin
     // just after a canonical delimiter. Either way, extras retain their
@@ -195,7 +203,7 @@ export function renderWindow(
       blockEl.appendChild(wordEl);
     };
 
-    for (let i = renderStart; i < text.length; i++) {
+    for (let i = renderStart; i < renderEnd; i++) {
       const ch = text[i]!;
       const span = document.createElement("span");
       span.className = `scr-char scr-char--${charStateOf(sectionIndex, blockIndex, i)}`;
@@ -204,24 +212,25 @@ export function renderWindow(
       spanIndex.set(charKey(sectionIndex, blockIndex, i), span);
 
       const isDelimiter = ch === " ";
-      const isLastChar = i === text.length - 1;
+      const isLastRenderedChar = i === renderEnd - 1;
+      const isBlockLastChar = i === text.length - 1;
       if (isDelimiter) {
-        finishWord(span, isLastChar && hasBoundary);
+        finishWord(span, isBlockLastChar && hasBoundary);
         wordStart = i + 1;
         wordEl = document.createElement("span");
         wordEl.className = "scr-word";
       } else {
         wordEl.appendChild(span);
-        if (isLastChar) {
-          wordEl.classList.add("scr-word--block-end");
-          finishWord(undefined, hasBoundary);
+        if (isLastRenderedChar) {
+          if (isBlockLastChar) wordEl.classList.add("scr-word--block-end");
+          finishWord(undefined, isBlockLastChar && hasBoundary);
         }
       }
     }
 
     // A persisted position may be waiting exactly at a non-final block's
     // pilcrow. Render that target even though no canonical chars remain.
-    if (renderStart === text.length && hasBoundary) {
+    if (renderStart === renderEnd && renderEnd === text.length && hasBoundary) {
       wordEl.classList.add("scr-word--block-end");
       finishWord(undefined, true);
     }
@@ -319,26 +328,4 @@ export function positionCaret(
 
   caretEl.style.transform = `translate(${left}px, ${top}px)`;
   caretEl.style.height = `${height}px`;
-}
-
-/** Keep the active line roughly vertically stable as the user progresses,
- * the way Monkeytype scrolls a finished line out of view. No-op (safely)
- * under happy-dom, where layout metrics are always zero. */
-export function keepLineInView(
-  viewportEl: HTMLElement,
-  activeLineTop: number,
-  lineHeight: number,
-  visibleLines = 3,
-): void {
-  if (!lineHeight) return;
-  // With three or more rows, retain one completed row above the active row.
-  // A two-row viewport instead keeps the active row at the top, reserving
-  // the second row for upcoming text rather than pinning the caret at bottom.
-  const targetTop = normalizeVisibleLineCount(visibleLines) >= 3 ? lineHeight : 0;
-  const targetScrollTop = Math.max(0, activeLineTop - targetTop);
-  if (Math.abs(viewportEl.scrollTop - targetScrollTop) < 1) return;
-  // activeLineTop is already in content coordinates. Assigning the absolute
-  // target makes this idempotent; adding the value made every keystroke on
-  // one physical row scroll another row and pushed the text out of view.
-  viewportEl.scrollTop = targetScrollTop;
 }

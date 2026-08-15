@@ -5,7 +5,6 @@ import { describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   buildDom,
-  keepLineInView,
   positionCaret,
   renderWindow,
 } from "../../src/engine/dom";
@@ -49,24 +48,10 @@ describe("positionCaret", () => {
 });
 
 describe("buildDom", () => {
-  test.each([
-    [2, "3.2em"],
-    [3, "4.8em"],
-    [8, "12.8em"],
-  ])("sets a %i-line viewport height", (contextLines, expectedHeight) => {
+  test.each([2, 3, 8])("does not clip a finite lesson at %i context lines", (contextLines) => {
     const container = document.createElement("div");
     const refs = buildDom(container, makeSettings({ contextLines }));
-    expect(refs.rootEl.style.getPropertyValue("--scr-viewport-height")).toBe(
-      expectedHeight,
-    );
-  });
-
-  test("defensively falls back to three lines for an unsupported direct setting", () => {
-    const container = document.createElement("div");
-    const refs = buildDom(container, makeSettings({ contextLines: 0 }));
-    expect(refs.rootEl.style.getPropertyValue("--scr-viewport-height")).toBe(
-      "4.8em",
-    );
+    expect(refs.rootEl.style.getPropertyValue("--scr-viewport-height")).toBe("");
   });
 });
 
@@ -188,11 +173,32 @@ describe("renderWindow", () => {
     expect(refs.boundaryIndex.get("0:0")?.textContent).toBe("¶");
   });
 
-  test("defines a centered capped grid with full-width wrapping block rows", () => {
-    // happy-dom does not compute CSS Grid layout, so assert the stylesheet
+  test("honors an exclusive finite-lesson end without renumbering canonical spans", () => {
+    const host = document.createElement("div");
+    const refs = renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 1,
+          blockIndex: 2,
+          block: { kind: "paragraph", text: "one two future" },
+          endCharIndex: 8,
+        },
+      ],
+      () => "pending",
+      () => [],
+    );
+
+    expect(host.textContent).toBe("one two ");
+    expect(refs.spanIndex.get("1:2:7")?.textContent).toBe(" ");
+    expect(refs.spanIndex.has("1:2:8")).toBe(false);
+  });
+
+  test("defines a full-width finite fragment with wrapping block rows", () => {
+    // happy-dom does not compute the imported stylesheet, so assert its
     // contract directly and leave geometry to browser QA.
     expect(typingCss).toMatch(
-      /\.scr-text\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto;[^}]*width:\s*fit-content;[^}]*max-width:\s*100%;[^}]*margin-inline:\s*auto;/s,
+      /\.scr-text\s*\{[^}]*display:\s*block;[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*margin:\s*0;/s,
     );
     expect(typingCss).toMatch(
       /\.scr-block\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*min-width:\s*0;/s,
@@ -201,34 +207,7 @@ describe("renderWindow", () => {
     expect(blockRule).not.toMatch(/^\s*width\s*:/m);
     expect(typingCss).toMatch(/\.scr-word\s*\{[^}]*flex:\s*none;/s);
     expect(typingCss).toMatch(
-      /\.scr-viewport\s*\{[^}]*height:\s*var\(--scr-viewport-height,\s*4\.8em\);/s,
+      /\.scr-viewport\s*\{[^}]*overflow:\s*visible;[^}]*height:\s*auto;/s,
     );
-  });
-});
-
-describe("keepLineInView", () => {
-  test("does not accumulate scroll for repeated keys on the same physical line", () => {
-    const viewport = document.createElement("div");
-    viewport.scrollTop = 40;
-
-    keepLineInView(viewport, 80, 40);
-    expect(viewport.scrollTop).toBe(40);
-    keepLineInView(viewport, 80, 40);
-    expect(viewport.scrollTop).toBe(40);
-  });
-
-  test("keeps one completed row above for 3–8 lines, but active row on top for 2", () => {
-    const viewport = document.createElement("div");
-
-    keepLineInView(viewport, 80, 40, 2);
-    expect(viewport.scrollTop).toBe(80);
-
-    viewport.scrollTop = 0;
-    keepLineInView(viewport, 80, 40, 3);
-    expect(viewport.scrollTop).toBe(40);
-
-    viewport.scrollTop = 0;
-    keepLineInView(viewport, 80, 40, 8);
-    expect(viewport.scrollTop).toBe(40);
   });
 });

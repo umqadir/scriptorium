@@ -5,13 +5,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { DEFAULT_SETTINGS, type BookProgress, type ParsedBook } from "../../src/types";
 import { createInitialProgress } from "../../src/store/progress";
-import { getAppState, initAppState } from "../../src/ui/state";
+import { initAppState } from "../../src/ui/state";
 
 const storage = vi.hoisted(() => ({
   getBook: vi.fn(),
   getProgress: vi.fn(),
   saveProgress: vi.fn(async () => undefined),
-  saveSettings: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/store/books", async (importOriginal) => ({
@@ -23,11 +22,6 @@ vi.mock("../../src/store/progress", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/store/progress")>()),
   getProgress: storage.getProgress,
   saveProgress: storage.saveProgress,
-}));
-
-vi.mock("../../src/store/settings", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/store/settings")>()),
-  saveSettings: storage.saveSettings,
 }));
 
 import { mountReader } from "../../src/ui/reader";
@@ -68,8 +62,6 @@ describe("mountReader", () => {
     storage.getProgress.mockReset();
     storage.saveProgress.mockReset();
     storage.saveProgress.mockResolvedValue(undefined);
-    storage.saveSettings.mockReset();
-    storage.saveSettings.mockResolvedValue(undefined);
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false });
     location.hash = "#/reader/book-1";
   });
@@ -133,6 +125,8 @@ describe("mountReader", () => {
       "reader-topbar-center",
       "reader-actions reader-topbar-trailing",
     ]);
+    expect(shell.querySelector(".reader-line-count-select")).toBeNull();
+    expect(shell.querySelector(".reader-lesson-size")).toBeNull();
 
     const input = shell.querySelector<HTMLElement>(".scr-hidden-input")!;
     const stats = workspace.querySelector<HTMLElement>(".reader-live-stats")!;
@@ -193,58 +187,9 @@ describe("mountReader", () => {
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
   });
 
-  test("changes visible lines live without recreating or resetting the typing session", async () => {
-    const parsed = book("abc");
-    storage.getBook.mockResolvedValue(stored(parsed));
-    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 3));
-    const host = document.createElement("main");
-    document.body.appendChild(host);
-    const updateSettings = vi.spyOn(getAppState(), "updateSettings");
-
-    const handle = mountReader(host, "book-1");
-    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
-    const root = host.querySelector<HTMLElement>(".scr-root")!;
-    const input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
-    await vi.waitFor(() =>
-      expect(host.querySelector(".scr-char--correct")?.textContent).toBe("a")
-    );
-    const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
-    await vi.waitFor(() => expect(liveStats.hidden).toBe(false));
-    const statsBefore = host.querySelector(".reader-live-stats")?.textContent;
-
-    const lineCount = host.querySelector<HTMLSelectElement>(".reader-line-count-select")!;
-    expect(lineCount.getAttribute("aria-label")).toBe("Visible lines");
-    expect(lineCount.options).toHaveLength(7);
-    expect(lineCount.value).toBe("3");
-    lineCount.focus();
-    expect(host.querySelector(".reader-shell")?.classList).not.toContain("reader-focused");
-    lineCount.value = "6";
-    lineCount.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await vi.waitFor(() =>
-      expect(updateSettings).toHaveBeenCalledWith({ contextLines: 6 })
-    );
-    await vi.waitFor(() =>
-      expect(storage.saveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ contextLines: 6 })
-      )
-    );
-    expect(getAppState().settings.contextLines).toBe(6);
-    expect(host.querySelector(".scr-root")).toBe(root);
-    expect(host.querySelector(".scr-hidden-input")).toBe(input);
-    expect(root.style.getPropertyValue("--scr-viewport-height")).toBe("9.6em");
-    expect(host.querySelector(".scr-char--correct")?.textContent).toBe("a");
-    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(statsBefore);
-    expect(lineCount.value).toBe("6");
-    expect(document.activeElement).toBe(lineCount);
-    handle.unmount?.();
-    host.remove();
-    updateSettings.mockRestore();
-  });
-
   test("persists two rolling lessons exactly once and keeps the latest score through idle handoff", async () => {
     vi.useFakeTimers();
+    initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false, showLiveWpm: false });
     const text = Array.from(
       { length: 21 },
       (_, index) => String.fromCharCode("a".charCodeAt(0) + index).repeat(10)
@@ -259,6 +204,8 @@ describe("mountReader", () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
     const input = host.querySelector(".scr-hidden-input")!;
+    const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
+    expect(liveStats.hidden).toBe(true);
     const press = (key: string) =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
@@ -274,6 +221,7 @@ describe("mountReader", () => {
     expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe("k");
     const firstResult = host.querySelector(".reader-live-stats")?.textContent;
     expect(firstResult).toContain("1320 wpm");
+    expect(liveStats.hidden).toBe(false);
 
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
     let snapshots = (
@@ -286,6 +234,7 @@ describe("mountReader", () => {
     press(text[110]!);
     expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
     await vi.advanceTimersByTimeAsync(2_000);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
     for (let index = 111; index < 220; index += 1) press(text[index]!);
 
     expect(host.querySelector(".reader-session-results")).toBeNull();

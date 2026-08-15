@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildCanonicalNonSpaceIndex,
   canonicalNonSpaceCharsAt,
+  findLessonEnd,
   normalizePosition,
 } from "../../src/engine/text-model";
 import { makeBook } from "./helpers";
@@ -79,5 +80,32 @@ describe("canonical non-space index", () => {
     expect(countAt(0, 1, 0)).toBe(2);
     expect(countAt(3, 0, 1)).toBe(2);
     expect(countAt(3, 0, 2)).toBe(3);
+  });
+});
+
+describe("findLessonEnd", () => {
+  test("ends after the first post-target space and otherwise uses the final remainder", () => {
+    const text = `${"a".repeat(99)} bb future`;
+    const book = makeBook([{ id: "one", blocks: [{ text }] }]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 103 });
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 103 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: text.length });
+  });
+
+  test("uses an Enter end across included sections and skips excluded or empty content", () => {
+    const book = makeBook([
+      { id: "one", blocks: [{ text: "a".repeat(60) }, { text: "b".repeat(45) }] },
+      { id: "excluded", included: false, blocks: [{ text: "x".repeat(200) }] },
+      { id: "empty", blocks: [] },
+      { id: "two", blocks: [{ text: "remainder" }] },
+    ]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 3, blockIndex: 0, charIndex: 0 });
   });
 });

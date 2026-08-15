@@ -257,25 +257,6 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
   );
   errorSelect.value = appState.settings.stopOnError;
 
-  const visibleLinesValue = el("span", {}, `${appState.settings.contextLines} lines`);
-  const visibleLinesInput = el("input", {
-    attrs: {
-      type: "range",
-      min: "2",
-      max: "8",
-      step: "1",
-      value: String(appState.settings.contextLines),
-      "aria-label": "Visible lines",
-    },
-    on: {
-      input: () => {
-        const value = Number.parseInt(visibleLinesInput.value, 10);
-        visibleLinesValue.textContent = `${value} lines`;
-        savePatch({ contextLines: value });
-      },
-    },
-  }) as HTMLInputElement;
-
   const smoothCaret = checkboxField({
     label: "smooth caret",
     help: "Animate the caret between characters.",
@@ -310,7 +291,6 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
       { className: "settings-grid" },
       field("caret", caretControl),
       field("errors", errorSelect, "Choose whether a wrong letter or word blocks progress."),
-      field("visible lines", el("div", { className: "field" }, visibleLinesInput, visibleLinesValue)),
       smoothCaret.root,
       foldAccents.root,
       soundOnClick.root,
@@ -431,8 +411,6 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
     fontSizeInput.value = String(settings.fontSize);
     fontSizeValue.textContent = `${settings.fontSize.toFixed(1)} rem`;
     errorSelect.value = settings.stopOnError;
-    visibleLinesInput.value = String(settings.contextLines);
-    visibleLinesValue.textContent = `${settings.contextLines} lines`;
     smoothCaret.input.checked = settings.smoothCaret;
     foldAccents.input.checked = settings.foldAccents;
     soundOnClick.input.checked = settings.soundOnClick;

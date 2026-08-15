@@ -84,6 +84,51 @@ describe("basic character states", () => {
     session.destroy();
   });
 
+  test("moves the caret through stable lesson nodes without scrolling", () => {
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "abc" }] }]),
+      container,
+      settings: makeSettings({ caretStyle: "line" }),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const viewport = container.querySelector<HTMLElement>(".scr-viewport")!;
+    const textEl = container.querySelector<HTMLElement>(".scr-text")!;
+    const lessonNode = textEl.firstElementChild;
+    const chars = textEl.querySelectorAll<HTMLElement>(".scr-char");
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 300,
+      height: 100,
+    } as DOMRect);
+    [...chars].forEach((span, index) => {
+      vi.spyOn(span, "getBoundingClientRect").mockReturnValue({
+        left: index * 10,
+        top: 0,
+        width: 10,
+        height: 20,
+      } as DOMRect);
+    });
+    viewport.scrollTop = 13;
+    session.applySettings(makeSettings({ caretStyle: "line" }));
+
+    pressChar(input, "a");
+    expect(container.querySelector<HTMLElement>(".scr-caret")?.style.transform).toBe(
+      "translate(10px, 13px)",
+    );
+    expect(textEl.firstElementChild).toBe(lessonNode);
+    expect(viewport.scrollTop).toBe(13);
+
+    pressChar(input, "b");
+    expect(container.querySelector<HTMLElement>(".scr-caret")?.style.transform).toBe(
+      "translate(20px, 13px)",
+    );
+    expect(textEl.firstElementChild).toBe(lessonNode);
+    expect(viewport.scrollTop).toBe(13);
+    session.destroy();
+  });
+
   test("wrong input marks the character incorrect and (by default) still advances", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "abc" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings({ stopOnError: "off" }) });
@@ -407,10 +452,24 @@ describe("explicit block boundaries", () => {
     });
     session.start();
     const input = getHiddenInput(container);
+    const textEl = container.querySelector<HTMLElement>(".scr-text")!;
+    const oldLessonNodes = [...textEl.children];
+    const firstCanonicalSpan = textEl.querySelector(".scr-char");
+    const viewport = container.querySelector<HTMLElement>(".scr-viewport")!;
+    viewport.scrollTop = 37;
+
+    expect(
+      [...textEl.querySelectorAll<HTMLElement>(".scr-char")]
+        .map((span) => span.textContent)
+        .join(""),
+    ).toBe(`${firstWord} bb `);
+    expect(textEl.textContent).not.toContain("tail");
 
     typeText(input, firstWord);
     pressChar(input, " ");
     expect(completed).toHaveLength(0); // 99 non-space chars is still short.
+    expect(textEl.querySelector(".scr-char")).toBe(firstCanonicalSpan);
+    expect(viewport.scrollTop).toBe(37);
 
     pressChar(input, "x"); // wrong first b, then correct it.
     pressBackspace(input);
@@ -420,6 +479,8 @@ describe("explicit block boundaries", () => {
     pressChar(input, " ");
 
     expect(completed).toHaveLength(1);
+    expect(oldLessonNodes.every((node) => !node.isConnected)).toBe(true);
+    expect(viewport.scrollTop).toBe(0);
     expect(completed[0]).toMatchObject({
       stats: { charsTyped: 104, errors: 1, elapsedMs: 1_000 },
       position: { sectionIndex: 0, blockIndex: 0, charIndex: 103 },
@@ -522,6 +583,45 @@ describe("explicit block boundaries", () => {
     );
     pressEnter(getHiddenInput(container));
     expect(session.getPosition().blockIndex).toBe(1);
+    session.destroy();
+  });
+
+  test("one finite lesson can cross blocks and sections without mounting the next lesson", () => {
+    const first = "a".repeat(60);
+    const second = "b".repeat(45);
+    const book = makeBook([
+      { id: "one", blocks: [{ text: first }, { text: second }] },
+      { id: "two", blocks: [{ text: "remainder" }] },
+    ]);
+    const lessons = vi.fn();
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+      onLessonComplete: lessons,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    expect(container.querySelectorAll(".scr-block")).toHaveLength(2);
+    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(2);
+    expect(container.querySelector(".scr-text")?.textContent).not.toContain(
+      "remainder",
+    );
+
+    typeText(input, first);
+    pressEnter(input);
+    typeText(input, second);
+    pressEnter(input);
+
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(lessons.mock.calls[0]?.[1]).toEqual({
+      sectionIndex: 1,
+      blockIndex: 0,
+      charIndex: 0,
+    });
+    expect(container.querySelectorAll(".scr-block")).toHaveLength(1);
+    expect(container.querySelector(".scr-text")?.textContent).toBe("remainder");
     session.destroy();
   });
 
@@ -805,7 +905,7 @@ describe("position and settings", () => {
     focus.mockRestore();
   });
 
-  test("keeps a section mounted across source-block boundaries", () => {
+  test("keeps the current finite lesson mounted across source-block boundaries", () => {
     const book = makeBook([
       { id: "ch1", blocks: [{ text: "one" }, { text: "two" }, { text: "three" }] },
     ]);
@@ -922,7 +1022,7 @@ describe("position and settings", () => {
     session.destroy();
   });
 
-  test("applySettings updates caret style and visible viewport height", () => {
+  test("applySettings updates caret style without clipping the finite lesson", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "hello" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings({ caretStyle: "line" }) });
     session.start();
@@ -934,7 +1034,7 @@ describe("position and settings", () => {
       container.querySelector<HTMLElement>(".scr-root")?.style.getPropertyValue(
         "--scr-viewport-height",
       ),
-    ).toBe("12.8em");
+    ).toBe("");
 
     session.destroy();
   });

@@ -51,6 +51,45 @@ export function canonicalNonSpaceCharsAt(
   return entry.base + entry.prefix[charIndex]!;
 }
 
+/** Canonical exclusive end of a finite lesson beginning at `start`.
+ * A lesson stops after the first space reached with the target number of
+ * non-space characters, or after the Enter boundary whose completed block
+ * reaches the target. If neither occurs, the final book position is used. */
+export function findLessonEnd(
+  book: ParsedBook,
+  start: Position,
+  targetNonSpaceChars: number,
+): Position {
+  let position = normalizePosition(book, start);
+  if (!hasTypeableContent(book)) return position;
+  const target = Math.max(
+    1,
+    Number.isFinite(targetNonSpaceChars)
+      ? Math.floor(targetNonSpaceChars)
+      : 1,
+  );
+  let nonSpaceChars = 0;
+
+  while (true) {
+    const block = book.sections[position.sectionIndex]?.blocks[position.blockIndex];
+    if (!block) return position;
+    for (let charIndex = position.charIndex; charIndex < block.text.length; charIndex++) {
+      const char = block.text[charIndex]!;
+      if (char !== " ") nonSpaceChars += 1;
+      if (char === " " && nonSpaceChars >= target) {
+        return { ...position, charIndex: charIndex + 1 };
+      }
+    }
+
+    const next = findNextBlock(book, position.sectionIndex, position.blockIndex);
+    if (!next) return { ...position, charIndex: block.text.length };
+    // The pilcrow/Enter is a natural boundary and belongs to this lesson;
+    // its exclusive end is the next block's canonical zero position.
+    if (nonSpaceChars >= target) return { ...next, charIndex: 0 };
+    position = { ...next, charIndex: 0 };
+  }
+}
+
 function nonNegativeInteger(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);

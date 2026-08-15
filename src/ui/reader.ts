@@ -12,8 +12,6 @@ import {
   saveProgress,
 } from "../store/progress";
 import {
-  MAX_VISIBLE_LINE_COUNT,
-  MIN_VISIBLE_LINE_COUNT,
   type BookProgress,
   type ParsedBook,
   type Position,
@@ -177,13 +175,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let statsEl: HTMLElement;
   let typingHost: HTMLElement;
   let hintEl: HTMLElement;
-  let lineCountSelectEl: HTMLSelectElement;
   let latestStats: SessionStats | undefined;
+  let latestCompletedStats: SessionStats | undefined;
 
   const updateChrome = (
     position: Position,
     _charsCompleted: number,
-    stats?: SessionStats
+    stats?: SessionStats,
+    completedResult = false
   ): void => {
     if (!runtimeBook || !progress || !bookTitleEl) return;
     bookTitleEl.textContent = runtimeBook.meta.title || "Untitled book";
@@ -192,10 +191,17 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       position.sectionIndex
     );
     if (stats) {
-      latestStats = stats;
-      wpmValueEl.textContent = String(Math.round(stats.wpm));
-      accuracyValueEl.textContent = formatPercent(stats.accuracy);
-      statsEl.hidden = !getAppState().settings.showLiveWpm || stats.charsTyped === 0;
+      if (completedResult) latestCompletedStats = stats;
+      const showLive = getAppState().settings.showLiveWpm;
+      const shown = !showLive && !completedResult && latestCompletedStats
+        ? latestCompletedStats
+        : stats;
+      latestStats = shown;
+      wpmValueEl.textContent = String(Math.round(shown.wpm));
+      accuracyValueEl.textContent = formatPercent(shown.accuracy);
+      // The setting suppresses only volatile in-progress stats. A completed
+      // Keybr-style lesson result remains an indicator until replaced.
+      statsEl.hidden = shown.charsTyped === 0 || (!showLive && !latestCompletedStats);
     }
   };
 
@@ -418,7 +424,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         // the chrome while the new lesson remains idle.
         commitRun(stats, position, charsAtPosition(runtimeBook!, position));
         latestStats = stats;
-        updateChrome(position, charsAtPosition(runtimeBook!, position), stats);
+        updateChrome(position, charsAtPosition(runtimeBook!, position), stats, true);
       },
       onSectionComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
@@ -521,6 +527,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       finalStats = undefined;
       routeTotals = { ...EMPTY_TOTALS };
       latestStats = undefined;
+      latestCompletedStats = undefined;
       peakWpm = 0;
     }
     const requested =
@@ -562,6 +569,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       finalStats = undefined;
       routeTotals = { ...EMPTY_TOTALS };
       latestStats = undefined;
+      latestCompletedStats = undefined;
       peakWpm = 0;
     }
     chooserResumePosition = undefined;
@@ -916,45 +924,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
     });
     hintEl = el("p", { className: "reader-hint" }, ACTIVE_READER_HINT);
-    lineCountSelectEl = el(
-      "select",
-      {
-        className: "reader-line-count-select",
-        attrs: {
-          "aria-label": "Visible lines",
-          title: "Visible lines",
-        },
-        value: String(getAppState().settings.contextLines),
-        on: {
-          change: (event: Event) => {
-            const select = event.currentTarget as HTMLSelectElement;
-            const contextLines = Number(select.value);
-            if (
-              !Number.isInteger(contextLines) ||
-              contextLines < MIN_VISIBLE_LINE_COUNT ||
-              contextLines > MAX_VISIBLE_LINE_COUNT
-            ) {
-              select.value = String(getAppState().settings.contextLines);
-              return;
-            }
-            void getAppState().updateSettings({ contextLines }).catch((error: unknown) => {
-              console.error("Failed to save visible line count", error);
-              if (!cancelled) showToast("Couldn't save the visible line count.", "error");
-            });
-          },
-        },
-      },
-      ...Array.from(
-        { length: MAX_VISIBLE_LINE_COUNT - MIN_VISIBLE_LINE_COUNT + 1 },
-        (_, offset) => {
-          const count = MIN_VISIBLE_LINE_COUNT + offset;
-          return el("option", { attrs: { value: String(count) } }, `${count} lines`);
-        }
-      )
-    );
-    // Set after options exist: assigning a select's value before appending
-    // options falls back to the first option in some DOM implementations.
-    lineCountSelectEl.value = String(getAppState().settings.contextLines);
     const chrome = el(
       "div",
       {
@@ -982,12 +951,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         el(
           "div",
           { className: "reader-actions reader-topbar-trailing" },
-          el(
-            "label",
-            { className: "reader-line-count-control" },
-            el("span", { className: "visually-hidden" }, "Visible lines"),
-            lineCountSelectEl
-          ),
           el(
             "button",
             {
@@ -1105,9 +1068,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       unsubscribeSettings = getAppState().subscribe((settings) => {
         if (cancelled) return;
         session?.applySettings(settings);
-        lineCountSelectEl.value = String(settings.contextLines);
-        statsEl.hidden =
-          !settings.showLiveWpm || !latestStats || latestStats.charsTyped === 0;
+        const shown = settings.showLiveWpm ? latestStats : latestCompletedStats;
+        if (shown) {
+          wpmValueEl.textContent = String(Math.round(shown.wpm));
+          accuracyValueEl.textContent = formatPercent(shown.accuracy);
+        }
+        statsEl.hidden = !shown || shown.charsTyped === 0;
       });
 
       if (!hasTypeableSection(runtimeBook)) {

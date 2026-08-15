@@ -81,15 +81,7 @@ describe("settings screen", () => {
     expect(container.querySelector('input[aria-label="Reader font size"]')).not.toBeNull();
     expect(container.querySelector('[role="group"][aria-label="Caret style"]')).not.toBeNull();
     expect(container.querySelector('select[aria-label="Stop on error behavior"]')).not.toBeNull();
-    const visibleLines = container.querySelector<HTMLInputElement>('input[aria-label="Visible lines"]');
-    expect(visibleLines?.min).toBe("2");
-    expect(visibleLines?.max).toBe("8");
-    expect(visibleLines?.value).toBe("3");
-    if (!visibleLines) throw new Error("visible lines control missing");
-    visibleLines.value = "7";
-    visibleLines.dispatchEvent(new Event("input"));
-    expect(mocks.appState.updateSettings).toHaveBeenCalledWith({ contextLines: 7 });
-    expect(visibleLines.value).toBe("7");
+    expect(container.querySelector('input[aria-label="Visible lines"]')).toBeNull();
     expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(4);
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Theme"]')?.value).toBe("serika_dark");
   });
