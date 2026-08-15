@@ -191,6 +191,10 @@ p {
   min-width: 0;
 }
 
+.app-main.reader-main {
+  padding-block: 2rem;
+}
+
 /* icon-only nav/utility buttons */
 .icon-button {
   display: inline-flex;
@@ -787,18 +791,16 @@ fieldset {
 
 .reader-shell {
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0;
-  min-height: calc(100dvh - 4.5rem);
+  min-height: calc(100dvh - 4rem);
   width: 100%;
   max-width: 1536px;
   margin: 0 auto;
 }
 
 .reader-chrome {
-  display: grid;
   align-self: start;
-  gap: 0.6rem;
   transition: opacity 0.2s ease;
 }
 .reader-shell.reader-focused .reader-chrome {
@@ -807,15 +809,25 @@ fieldset {
 }
 
 .reader-topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 1rem;
+}
+.reader-topbar-leading {
+  justify-self: start;
+}
+.reader-topbar-center {
+  width: min(34rem, 42vw);
+  min-width: 0;
+}
+.reader-topbar-trailing {
+  justify-self: end;
 }
 .reader-titles {
   display: grid;
   text-align: center;
-  flex: 1;
+  min-width: 0;
 }
 .reader-book-title {
   font-size: 0.95rem;
@@ -826,40 +838,46 @@ fieldset {
   color: var(--sub-color);
 }
 
-.reader-progress-bar {
-  height: 0.3rem;
-  border-radius: 1rem;
-  background: var(--sub-alt-color);
-  overflow: hidden;
-}
-.reader-progress-fill {
-  height: 100%;
-  background: var(--main-color);
-  transition: width 0.15s linear;
-}
-
 .reader-live-stats {
   display: flex;
-  gap: 1.5rem;
-  justify-content: center;
+  align-items: baseline;
+  gap: 1.25rem;
+  justify-content: flex-start;
   color: var(--sub-color);
-  font-size: 0.85rem;
-  min-height: 1.2rem;
+  min-height: 1.5rem;
+}
+.reader-live-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.2rem;
 }
 .reader-live-stats .stat-value {
   color: var(--main-color);
+  font-size: 1.45rem;
   font-weight: 600;
+  line-height: 1;
+}
+.reader-live-stats .stat-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.reader-workspace {
+  min-height: 0;
+  display: grid;
+  /* Reserve the score row so toggling live WPM never shifts the text. */
+  grid-template-rows: minmax(1.5rem, auto) auto auto;
+  align-content: center;
+  gap: 0.45rem;
+  /* Optical lift: centering the full three-line viewport otherwise places
+     its first glyph row below Monkeytype's measured reading axis. */
+  transform: translateY(-2.25rem);
 }
 
 .typing-container {
-  font-family: var(--reader-font);
-  font-size: calc(1rem * var(--font-size-scale));
-  line-height: 1.6;
   color: var(--sub-color);
   min-height: 0;
-  /* Measured against Monkeytype at equal viewport sizes: its first typing
-     row sits at roughly 34.5dvh, below the persistent controls. */
-  margin-top: clamp(8rem, 22dvh, 14rem);
   outline: none;
   cursor: text;
 }
@@ -894,7 +912,6 @@ fieldset {
 }
 
 .reader-hint {
-  align-self: start;
   padding-top: 1.25rem;
   text-align: center;
   color: var(--sub-color);
@@ -1068,6 +1085,12 @@ fieldset {
   .app-main {
     padding: 1rem 1rem 2rem;
   }
+  .app-main.reader-main {
+    padding-block: 1rem;
+  }
+  .reader-shell {
+    min-height: calc(100dvh - 2rem);
+  }
   .settings-screen,
   .settings-section,
   .settings-grid,
@@ -1199,12 +1222,10 @@ fieldset {
     border: 1px solid ButtonText;
   }
   .book-progress-bar,
-  .reader-progress-bar,
   .storage-bar {
     border: 1px solid CanvasText;
   }
   .book-progress-fill,
-  .reader-progress-fill,
   .storage-bar-fill,
   .scr-caret {
     background: Highlight;

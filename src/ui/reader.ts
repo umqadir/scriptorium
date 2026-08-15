@@ -164,8 +164,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   let bookTitleEl: HTMLElement;
   let currentSectionEl: HTMLButtonElement;
-  let progressFillEl: HTMLElement;
-  let progressBarEl: HTMLElement;
   let wpmValueEl: HTMLElement;
   let accuracyValueEl: HTMLElement;
   let statsEl: HTMLElement;
@@ -175,7 +173,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   const updateChrome = (
     position: Position,
-    charsCompleted: number,
+    _charsCompleted: number,
     stats?: SessionStats
   ): void => {
     if (!runtimeBook || !progress || !bookTitleEl) return;
@@ -184,13 +182,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       runtimeBook.sections[position.sectionIndex],
       position.sectionIndex
     );
-    const percent =
-      progress.totalChars > 0
-        ? Math.max(0, Math.min(100, (charsCompleted / progress.totalChars) * 100))
-        : 0;
-    progressFillEl.style.width = `${percent}%`;
-    progressBarEl.setAttribute("aria-valuenow", String(Math.round(percent)));
-    progressBarEl.setAttribute("aria-valuetext", `${Math.round(percent)}% complete`);
     if (stats) {
       latestStats = stats;
       wpmValueEl.textContent = String(Math.round(stats.wpm));
@@ -849,22 +840,23 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       attrs: { type: "button", title: "Open table of contents", "aria-label": "Open table of contents" },
       on: { click: () => openContents() },
     });
-    progressFillEl = el("div", { className: "reader-progress-fill" });
-    progressBarEl = el(
-      "div",
-      {
-        className: "reader-progress-bar",
-        attrs: { role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100" },
-      },
-      progressFillEl
-    );
     wpmValueEl = el("span", { className: "stat-value" }, "0");
     accuracyValueEl = el("span", { className: "stat-value" }, "100%");
     statsEl = el(
       "div",
       { className: "reader-live-stats", attrs: { "aria-live": "polite" } },
-      el("span", {}, wpmValueEl, " wpm"),
-      el("span", {}, accuracyValueEl, " accuracy")
+      el(
+        "span",
+        { className: "reader-live-stat" },
+        wpmValueEl,
+        el("span", { className: "stat-label" }, " wpm")
+      ),
+      el(
+        "span",
+        { className: "reader-live-stat" },
+        accuracyValueEl,
+        el("span", { className: "stat-label" }, " accuracy")
+      )
     );
     typingHost = el("div", {
       className: "typing-container",
@@ -906,16 +898,24 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       el(
         "div",
         { className: "reader-topbar" },
-        el("button", {
-          className: "icon-button",
-          attrs: { type: "button", "aria-label": "Back to library" },
-          on: { click: () => navigate({ name: "library" }) },
-          html: icons.arrowLeft,
-        }),
-        el("div", { className: "reader-titles" }, bookTitleEl, currentSectionEl),
         el(
           "div",
-          { className: "reader-actions" },
+          { className: "reader-topbar-leading" },
+          el("button", {
+            className: "icon-button",
+            attrs: { type: "button", "aria-label": "Back to library" },
+            on: { click: () => navigate({ name: "library" }) },
+            html: icons.arrowLeft,
+          })
+        ),
+        el(
+          "div",
+          { className: "reader-topbar-center" },
+          el("div", { className: "reader-titles" }, bookTitleEl, currentSectionEl)
+        ),
+        el(
+          "div",
+          { className: "reader-actions reader-topbar-trailing" },
           el(
             "button",
             {
@@ -939,12 +939,18 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
             html: icons.gear,
           })
         )
-      ),
-      progressBarEl
+      )
     );
-    // Live scoring is intentionally outside the fading navigation chrome:
-    // focused typing hides title/actions/progress, never enabled WPM/accuracy.
-    shell.append(chrome, statsEl, typingHost, hintEl);
+    const workspace = el(
+      "div",
+      { className: "reader-workspace" },
+      statsEl,
+      typingHost,
+      hintEl
+    );
+    // Live scoring belongs to the same content axis as the text, outside the
+    // fading navigation chrome so focused typing never hides enabled stats.
+    shell.append(chrome, workspace);
     shell.addEventListener("pointermove", () => shell.classList.remove("reader-focused"));
     statsEl.hidden = true;
   };

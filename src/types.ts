@@ -178,7 +178,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   theme: "serika_dark",
   fontFamily: "Roboto Mono",
-  fontSize: 1.5,
+  fontSize: 2,
   caretStyle: "line",
   smoothCaret: true,
   stopOnError: "off",

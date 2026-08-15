@@ -397,6 +397,7 @@ window.addEventListener("blur", hideDropOverlay);
 function setRouteChrome(route: Route): void {
   const inReader = route.name === "reader";
   header.hidden = inReader;
+  main.classList.toggle("reader-main", inReader);
   app.style.gridTemplateRows = inReader ? "1fr" : "";
   if (route.name === "library") libraryLink.setAttribute("aria-current", "page");
   else libraryLink.removeAttribute("aria-current");

@@ -7,6 +7,14 @@ import { DEFAULT_SETTINGS, type Settings } from "../types";
 import { getDb, SETTINGS_KEY } from "./db";
 
 const LOCAL_STORAGE_KEY = "scriptorium:settings";
+const MIGRATION_VERSION_KEY = "scriptorium:settings:migration-version";
+const CURRENT_MIGRATION_VERSION = 1;
+const LEGACY_DEFAULT_FONT_SIZE = 1.5;
+const PERSISTED_MIGRATION_VERSION_FIELD = "__settingsMigrationVersion";
+
+type PersistedSettings = Settings & {
+  [PERSISTED_MIGRATION_VERSION_FIELD]: number;
+};
 
 const CARET_STYLES = new Set<Settings["caretStyle"]>(["line", "block", "underline", "off"]);
 const STOP_ON_ERROR_VALUES = new Set<Settings["stopOnError"]>(["off", "letter", "word"]);
@@ -65,6 +73,39 @@ export function mergeSettings(partial: Partial<Settings> | null | undefined): Se
   };
 }
 
+function hasCompletedMigrations(): boolean {
+  try {
+    const raw = localStorage.getItem(MIGRATION_VERSION_KEY);
+    if (raw === null || !/^\d+$/.test(raw)) return false;
+    const version = Number(raw);
+    return Number.isSafeInteger(version) && version >= CURRENT_MIGRATION_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+function hasCompletedPersistedMigrations(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const version = (value as Record<string, unknown>)[PERSISTED_MIGRATION_VERSION_FIELD];
+  return (
+    typeof version === "number" &&
+    Number.isInteger(version) &&
+    version >= CURRENT_MIGRATION_VERSION
+  );
+}
+
+function toPersistedSettings(settings: Settings): PersistedSettings {
+  return {
+    ...settings,
+    [PERSISTED_MIGRATION_VERSION_FIELD]: CURRENT_MIGRATION_VERSION,
+  };
+}
+
+function migrateLegacyDefaults(settings: Settings): Settings {
+  if (settings.fontSize !== LEGACY_DEFAULT_FONT_SIZE) return settings;
+  return { ...settings, fontSize: DEFAULT_SETTINGS.fontSize };
+}
+
 /** Synchronous best-effort read for first paint, before IndexedDB is open.
  * Never throws; falls back to defaults if localStorage is unavailable
  * (private browsing, disabled storage) or holds nothing/garbage yet. */
@@ -72,7 +113,16 @@ export function getSettingsSync(): Settings {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    return mergeSettings(JSON.parse(raw) as Partial<Settings>);
+    const parsed = JSON.parse(raw) as unknown;
+    const settings = mergeSettings(parsed as Partial<Settings>);
+    if (hasCompletedPersistedMigrations(parsed) || hasCompletedMigrations()) return settings;
+
+    // First paint must agree with the eventual IndexedDB migration, but do
+    // not mark it complete yet: IndexedDB is the durable source and still
+    // needs to be migrated by getSettings().
+    const migrated = migrateLegacyDefaults(settings);
+    mirrorToLocalStorage(migrated);
+    return migrated;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -86,17 +136,39 @@ function mirrorToLocalStorage(settings: Settings): void {
   }
 }
 
+function mirrorAndMarkMigrationsComplete(settings: Settings): void {
+  try {
+    // Keep the version beside the mirrored value as well as in the small
+    // standalone key. If either key is cleared independently, the remaining
+    // metadata still prevents a deliberate 1.5rem choice being remigrated.
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(toPersistedSettings(settings)));
+    localStorage.setItem(MIGRATION_VERSION_KEY, String(CURRENT_MIGRATION_VERSION));
+  } catch {
+    // best-effort only; IndexedDB remains the source of truth
+  }
+}
+
 export async function getSettings(): Promise<Settings> {
   const db = await getDb();
   const stored = await db.get("settings", SETTINGS_KEY);
-  const settings = mergeSettings(stored);
-  mirrorToLocalStorage(settings);
+  let settings = mergeSettings(stored);
+  if (!hasCompletedPersistedMigrations(stored)) {
+    settings = migrateLegacyDefaults(settings);
+    // Persist settings and their migration version in one IndexedDB value.
+    // This is the durable source of truth; the private metadata field is
+    // stripped by mergeSettings before settings can reach UI or sync code.
+    await db.put("settings", toPersistedSettings(settings), SETTINGS_KEY);
+  }
+  mirrorAndMarkMigrationsComplete(settings);
   return settings;
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
   const full = mergeSettings(settings);
   const db = await getDb();
-  await db.put("settings", full, SETTINGS_KEY);
-  mirrorToLocalStorage(full);
+  await db.put("settings", toPersistedSettings(full), SETTINGS_KEY);
+  // A save made by the current app is an explicit user/current-schema value.
+  // Marking here ensures a deliberate 1.5rem choice is never mistaken for
+  // the legacy auto-persisted default on a later load.
+  mirrorAndMarkMigrationsComplete(full);
 }

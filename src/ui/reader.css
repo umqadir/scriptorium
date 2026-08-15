@@ -311,7 +311,28 @@
 
 @media (max-width: 600px) {
   .reader-topbar {
+    grid-template-areas:
+      "leading trailing"
+      "center center";
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.45rem;
+  }
+
+  .reader-topbar-leading {
+    grid-area: leading;
+  }
+
+  .reader-topbar-center {
+    grid-area: center;
+    width: 100%;
+  }
+
+  .reader-topbar-trailing {
+    grid-area: trailing;
+  }
+
+  .reader-workspace {
+    transform: translateY(-2.5rem);
   }
 
   .reader-actions {

@@ -90,6 +90,44 @@ describe("mountReader", () => {
     handle.unmount?.();
   });
 
+  test("uses one two-row reader grid without a progress bar", async () => {
+    const parsed = book("ab");
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 2));
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+
+    const shell = host.querySelector<HTMLElement>(".reader-shell")!;
+    const workspace = shell.querySelector<HTMLElement>(".reader-workspace")!;
+    expect([...shell.children].map((child) => child.className)).toEqual([
+      "reader-chrome",
+      "reader-workspace",
+    ]);
+    expect([...workspace.children].map((child) => child.className)).toEqual([
+      "reader-live-stats",
+      "typing-container",
+      "reader-hint",
+    ]);
+    expect(shell.querySelector('[role="progressbar"]')).toBeNull();
+    expect(shell.querySelector(".reader-progress-bar")).toBeNull();
+
+    const topbar = shell.querySelector<HTMLElement>(".reader-topbar")!;
+    expect([...topbar.children].map((child) => child.className)).toEqual([
+      "reader-topbar-leading",
+      "reader-topbar-center",
+      "reader-actions reader-topbar-trailing",
+    ]);
+
+    const input = shell.querySelector<HTMLElement>(".scr-hidden-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    expect(shell.classList).toContain("reader-focused");
+    expect(workspace.contains(shell.querySelector(".reader-live-stats"))).toBe(true);
+    expect(shell.querySelector(".reader-live-stats")?.closest(".reader-chrome")).toBeNull();
+    handle.unmount?.();
+  });
+
   test("persists completion and accumulates lifetime exactly once across completion and unmount", async () => {
     const parsed = book("a");
     const initial = createInitialProgress("book-1", 1);
