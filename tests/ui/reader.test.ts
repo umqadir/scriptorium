@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+// The project intentionally omits Node typings; this test parses the real
+// reader stylesheet because Vitest stubs CSS imports to an empty string.
+// @ts-expect-error Node's runtime module is available to the Vitest process.
+import { readFileSync } from "node:fs";
 import { DEFAULT_SETTINGS, type BookProgress, type ParsedBook } from "../../src/types";
 import { createInitialProgress } from "../../src/store/progress";
 import { initAppState } from "../../src/ui/state";
@@ -21,6 +25,8 @@ vi.mock("../../src/store/progress", async (importOriginal) => ({
 }));
 
 import { mountReader } from "../../src/ui/reader";
+
+const readerCss = readFileSync("src/ui/reader.css", "utf8");
 
 function book(text = "a", included = true): ParsedBook {
   return {
@@ -121,10 +127,29 @@ describe("mountReader", () => {
     ]);
 
     const input = shell.querySelector<HTMLElement>(".scr-hidden-input")!;
+    const stats = workspace.querySelector<HTMLElement>(".reader-live-stats")!;
+    const style = document.createElement("style");
+    style.textContent = readerCss;
+    document.head.appendChild(style);
+    const gridRowFor = (selector: string): string => {
+      const rule = [...(style.sheet?.cssRules ?? [])].find(
+        (candidate) => (candidate as CSSStyleRule).selectorText === selector
+      ) as CSSStyleRule | undefined;
+      return rule?.style.getPropertyValue("grid-row") ?? "";
+    };
+    expect(stats.hidden).toBe(true);
+    expect(gridRowFor(".reader-live-stats")).toBe("1");
+    expect(gridRowFor(".typing-container")).toBe("2");
+    expect(gridRowFor(".reader-hint")).toBe("3");
+    const typingRowBeforeStats = gridRowFor(".typing-container");
+
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    await vi.waitFor(() => expect(stats.hidden).toBe(false));
+    expect(gridRowFor(".typing-container")).toBe(typingRowBeforeStats);
     expect(shell.classList).toContain("reader-focused");
     expect(workspace.contains(shell.querySelector(".reader-live-stats"))).toBe(true);
     expect(shell.querySelector(".reader-live-stats")?.closest(".reader-chrome")).toBeNull();
+    style.remove();
     handle.unmount?.();
   });
 

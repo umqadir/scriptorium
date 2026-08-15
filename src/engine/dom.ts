@@ -8,7 +8,13 @@
  * mutate exactly the span(s) that changed.
  */
 
-import type { Block, CaretStyle, Settings, CharState } from "../types";
+import {
+  normalizeVisibleLineCount,
+  type Block,
+  type CaretStyle,
+  type Settings,
+  type CharState,
+} from "../types";
 
 export type DomRefs = {
   rootEl: HTMLDivElement;
@@ -63,6 +69,7 @@ export function buildDom(
   container.appendChild(rootEl);
 
   applyFont(rootEl, settings);
+  applyVisibleLineCount(rootEl, settings.contextLines);
   applyCaretStyle(caretEl, settings.caretStyle);
   applySmoothCaret(caretEl, settings.smoothCaret);
 
@@ -72,6 +79,15 @@ export function buildDom(
 export function applyFont(rootEl: HTMLElement, settings: Settings): void {
   rootEl.style.setProperty("--scr-font-family", settings.fontFamily);
   rootEl.style.setProperty("--scr-font-size", `${settings.fontSize}rem`);
+}
+
+export function applyVisibleLineCount(
+  rootEl: HTMLElement,
+  value: unknown,
+): void {
+  const lines = normalizeVisibleLineCount(value);
+  const heightEm = Number((lines * 1.6).toFixed(1));
+  rootEl.style.setProperty("--scr-viewport-height", `${heightEm}em`);
 }
 
 export function applyCaretStyle(
@@ -285,9 +301,13 @@ export function keepLineInView(
   viewportEl: HTMLElement,
   activeLineTop: number,
   lineHeight: number,
+  visibleLines = 3,
 ): void {
   if (!lineHeight) return;
-  const targetTop = lineHeight; // keep the active line pinned near the top
+  // With three or more rows, retain one completed row above the active row.
+  // A two-row viewport instead keeps the active row at the top, reserving
+  // the second row for upcoming text rather than pinning the caret at bottom.
+  const targetTop = normalizeVisibleLineCount(visibleLines) >= 3 ? lineHeight : 0;
   const targetScrollTop = Math.max(0, activeLineTop - targetTop);
   if (Math.abs(viewportEl.scrollTop - targetScrollTop) < 1) return;
   // activeLineTop is already in content coordinates. Assigning the absolute

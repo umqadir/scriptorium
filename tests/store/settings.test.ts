@@ -58,6 +58,16 @@ describe("mergeSettings", () => {
     expect(mergeSettings({ fontSize: 0.7 } as never).fontSize).toBe(DEFAULT_SETTINGS.fontSize);
   });
 
+  test("accepts only integer visible-line counts from 2 through 8", () => {
+    expect(mergeSettings({ contextLines: 2 }).contextLines).toBe(2);
+    expect(mergeSettings({ contextLines: 8 }).contextLines).toBe(8);
+    for (const contextLines of [0, 1, 2.5, 9, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(mergeSettings({ contextLines }).contextLines).toBe(
+        DEFAULT_SETTINGS.contextLines,
+      );
+    }
+  });
+
   test("returns only allowlisted fields", () => {
     const sentinel = "PRIVATE_BOOK_TEXT_SENTINEL";
     const merged = mergeSettings({ ...DEFAULT_SETTINGS, bookText: sentinel } as never);

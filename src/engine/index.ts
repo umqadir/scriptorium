@@ -37,6 +37,7 @@ import { SessionClock } from "./clock";
 import {
   buildDom,
   applyFont,
+  applyVisibleLineCount,
   applyCaretStyle,
   applySmoothCaret,
   renderWindow,
@@ -256,6 +257,7 @@ export class TypingSession {
     this.settings = settings;
     if (!this.dom) return;
     applyFont(this.dom.rootEl, settings);
+    applyVisibleLineCount(this.dom.rootEl, settings.contextLines);
     applyCaretStyle(this.dom.caretEl, settings.caretStyle);
     applySmoothCaret(this.dom.caretEl, settings.smoothCaret);
     this.updateCaret();
@@ -974,7 +976,12 @@ export class TypingSession {
     const fontSizePx = parseFloat(getComputedStyle(dom.rootEl).fontSize || "0");
     const lineHeight = fontSizePx ? fontSizePx * 1.6 : 0;
     const activeTop = targetRect.top - viewportRect.top + dom.viewportEl.scrollTop;
-    keepLineInView(dom.viewportEl, activeTop, lineHeight);
+    keepLineInView(
+      dom.viewportEl,
+      activeTop,
+      lineHeight,
+      this.settings.contextLines,
+    );
   }
 
   // ─────────────────────────────── timers ────────────────────────────────

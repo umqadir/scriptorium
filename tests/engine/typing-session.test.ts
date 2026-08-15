@@ -801,14 +801,19 @@ describe("position and settings", () => {
     session.destroy();
   });
 
-  test("applySettings updates caret style class without crashing", () => {
+  test("applySettings updates caret style and visible viewport height", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "hello" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings({ caretStyle: "line" }) });
     session.start();
 
-    session.applySettings(makeSettings({ caretStyle: "block" }));
+    session.applySettings(makeSettings({ caretStyle: "block", contextLines: 8 }));
     const caretEl = container.querySelector(".scr-caret");
     expect(caretEl?.className).toContain("scr-caret--block");
+    expect(
+      container.querySelector<HTMLElement>(".scr-root")?.style.getPropertyValue(
+        "--scr-viewport-height",
+      ),
+    ).toBe("12.8em");
 
     session.destroy();
   });

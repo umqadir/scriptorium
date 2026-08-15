@@ -160,6 +160,22 @@ export type BookProgress = {
 export type CaretStyle = "line" | "block" | "underline" | "off";
 export type StopOnError = "off" | "letter" | "word";
 
+export const MIN_VISIBLE_LINE_COUNT = 2;
+export const MAX_VISIBLE_LINE_COUNT = 8;
+export const DEFAULT_VISIBLE_LINE_COUNT = 3;
+
+/** Validate the persisted/public line-count setting at the engine boundary. */
+export function normalizeVisibleLineCount(value: unknown): number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_VISIBLE_LINE_COUNT &&
+    value <= MAX_VISIBLE_LINE_COUNT
+  )
+    ? value
+    : DEFAULT_VISIBLE_LINE_COUNT;
+}
+
 export type Settings = {
   theme: string;
   fontFamily: string;
@@ -171,7 +187,7 @@ export type Settings = {
   foldAccents: boolean;
   soundOnClick: boolean;
   showLiveWpm: boolean;
-  /** Legacy sync field. The reader follows Monkeytype's fixed three-line viewport. */
+  /** Physical typing rows visible at once. Integer from 2 through 8. */
   contextLines: number;
 };
 
@@ -185,7 +201,7 @@ export const DEFAULT_SETTINGS: Settings = {
   foldAccents: true,
   soundOnClick: false,
   showLiveWpm: true,
-  contextLines: 3,
+  contextLines: DEFAULT_VISIBLE_LINE_COUNT,
 };
 
 /**

@@ -3,7 +3,11 @@
  * localStorage lets the app apply a theme/font on first paint before the
  * IndexedDB connection opens (avoids a flash of default styling).
  */
-import { DEFAULT_SETTINGS, type Settings } from "../types";
+import {
+  DEFAULT_SETTINGS,
+  normalizeVisibleLineCount,
+  type Settings,
+} from "../types";
 import { getDb, SETTINGS_KEY } from "./db";
 
 const LOCAL_STORAGE_KEY = "scriptorium:settings";
@@ -65,11 +69,7 @@ export function mergeSettings(partial: Partial<Settings> | null | undefined): Se
       typeof partial.showLiveWpm === "boolean"
         ? partial.showLiveWpm
         : DEFAULT_SETTINGS.showLiveWpm,
-    contextLines:
-      Number.isInteger(partial.contextLines) &&
-      isFiniteNumberInRange(partial.contextLines, 0, 8)
-        ? partial.contextLines
-        : DEFAULT_SETTINGS.contextLines,
+    contextLines: normalizeVisibleLineCount(partial.contextLines),
   };
 }
 

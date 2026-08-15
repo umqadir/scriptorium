@@ -3,7 +3,13 @@ import { describe, expect, test, vi } from "vitest";
 // the stylesheet because Vitest stubs CSS (`?inline`/`?raw`) to an empty string.
 // @ts-expect-error Node's runtime module is available to the Vitest process.
 import { readFileSync } from "node:fs";
-import { keepLineInView, positionCaret, renderWindow } from "../../src/engine/dom";
+import {
+  buildDom,
+  keepLineInView,
+  positionCaret,
+  renderWindow,
+} from "../../src/engine/dom";
+import { makeSettings } from "./helpers";
 
 const typingCss = readFileSync("src/engine/typing.css", "utf8");
 
@@ -39,6 +45,28 @@ describe("positionCaret", () => {
     expect(caret.style.width).toBe("10px");
     expect(caret.style.height).toBe("1.6px");
     expect(caret.style.transform).toBe("translate(25px, 48.4px)");
+  });
+});
+
+describe("buildDom", () => {
+  test.each([
+    [2, "3.2em"],
+    [3, "4.8em"],
+    [8, "12.8em"],
+  ])("sets a %i-line viewport height", (contextLines, expectedHeight) => {
+    const container = document.createElement("div");
+    const refs = buildDom(container, makeSettings({ contextLines }));
+    expect(refs.rootEl.style.getPropertyValue("--scr-viewport-height")).toBe(
+      expectedHeight,
+    );
+  });
+
+  test("defensively falls back to three lines for an unsupported direct setting", () => {
+    const container = document.createElement("div");
+    const refs = buildDom(container, makeSettings({ contextLines: 0 }));
+    expect(refs.rootEl.style.getPropertyValue("--scr-viewport-height")).toBe(
+      "4.8em",
+    );
   });
 });
 
@@ -118,6 +146,9 @@ describe("renderWindow", () => {
     const blockRule = typingCss.match(/\.scr-block\s*\{([^}]*)\}/s)?.[1] ?? "";
     expect(blockRule).not.toMatch(/^\s*width\s*:/m);
     expect(typingCss).toMatch(/\.scr-word\s*\{[^}]*flex:\s*none;/s);
+    expect(typingCss).toMatch(
+      /\.scr-viewport\s*\{[^}]*height:\s*var\(--scr-viewport-height,\s*4\.8em\);/s,
+    );
   });
 });
 
@@ -129,6 +160,21 @@ describe("keepLineInView", () => {
     keepLineInView(viewport, 80, 40);
     expect(viewport.scrollTop).toBe(40);
     keepLineInView(viewport, 80, 40);
+    expect(viewport.scrollTop).toBe(40);
+  });
+
+  test("keeps one completed row above for 3–8 lines, but active row on top for 2", () => {
+    const viewport = document.createElement("div");
+
+    keepLineInView(viewport, 80, 40, 2);
+    expect(viewport.scrollTop).toBe(80);
+
+    viewport.scrollTop = 0;
+    keepLineInView(viewport, 80, 40, 3);
+    expect(viewport.scrollTop).toBe(40);
+
+    viewport.scrollTop = 0;
+    keepLineInView(viewport, 80, 40, 8);
     expect(viewport.scrollTop).toBe(40);
   });
 });

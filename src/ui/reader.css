@@ -53,7 +53,18 @@
   display: none;
 }
 
+/* Explicit placement keeps the typing surface on the same row while the
+   optional live score switches between display:none and visible. */
+.reader-live-stats {
+  grid-row: 1;
+}
+
+.typing-container {
+  grid-row: 2;
+}
+
 .reader-hint {
+  grid-row: 3;
   transition: opacity 0.2s ease;
 }
 

@@ -20,7 +20,7 @@
 .scr-viewport {
   position: relative;
   overflow: hidden;
-  height: 4.8em;
+  height: var(--scr-viewport-height, 4.8em);
   scroll-behavior: auto;
 }
 
