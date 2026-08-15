@@ -11,6 +11,7 @@ const storage = vi.hoisted(() => ({
   getBook: vi.fn(),
   getProgress: vi.fn(),
   saveProgress: vi.fn(async () => undefined),
+  saveSettings: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/store/books", async (importOriginal) => ({
@@ -22,6 +23,11 @@ vi.mock("../../src/store/progress", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/store/progress")>()),
   getProgress: storage.getProgress,
   saveProgress: storage.saveProgress,
+}));
+
+vi.mock("../../src/store/settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/store/settings")>()),
+  saveSettings: storage.saveSettings,
 }));
 
 import { mountReader } from "../../src/ui/reader";
@@ -62,6 +68,8 @@ describe("mountReader", () => {
     storage.getProgress.mockReset();
     storage.saveProgress.mockReset();
     storage.saveProgress.mockResolvedValue(undefined);
+    storage.saveSettings.mockReset();
+    storage.saveSettings.mockResolvedValue(undefined);
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false });
     location.hash = "#/reader/book-1";
   });
@@ -115,6 +123,7 @@ describe("mountReader", () => {
       "reader-live-stats",
       "typing-container",
       "reader-hint",
+      "visually-hidden reader-checkpoint-announcement",
     ]);
     expect(shell.querySelector('[role="progressbar"]')).toBeNull();
     expect(shell.querySelector(".reader-progress-bar")).toBeNull();
@@ -127,9 +136,33 @@ describe("mountReader", () => {
     ]);
     expect(shell.querySelector(".reader-line-count-select")).toBeNull();
     expect(shell.querySelector(".reader-lesson-size")).toBeNull();
+    const lessonLength = shell.querySelector<HTMLSelectElement>(
+      ".reader-lesson-length-select"
+    )!;
+    expect(lessonLength.getAttribute("aria-label")).toBe("Lesson length");
+    expect([...lessonLength.options].map((option) => option.textContent)).toEqual([
+      "100 chars",
+      "125 chars",
+      "150 chars",
+      "175 chars",
+      "200 chars",
+    ]);
+    expect(lessonLength.value).toBe("100");
 
     const input = shell.querySelector<HTMLElement>(".scr-hidden-input")!;
     const stats = workspace.querySelector<HTMLElement>(".reader-live-stats")!;
+    const checkpointAnnouncement = workspace.querySelector<HTMLElement>(
+      ".reader-checkpoint-announcement"
+    )!;
+    expect(stats.hasAttribute("aria-live")).toBe(false);
+    expect(checkpointAnnouncement.getAttribute("aria-live")).toBe("polite");
+    expect(checkpointAnnouncement.getAttribute("aria-atomic")).toBe("true");
+    expect(readerCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.reader-live-stats-complete\s*{\s*animation:\s*none;/
+    );
+    expect(readerCss).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*\.reader-lesson-length-select\s*{[\s\S]*min-height:\s*2\.75rem;[\s\S]*\.reader-topbar \.icon-button,[\s\S]*\.reader-contents-control\s*{[\s\S]*min-height:\s*2\.75rem;/
+    );
     const style = document.createElement("style");
     style.textContent = readerCss;
     document.head.appendChild(style);
@@ -187,11 +220,158 @@ describe("mountReader", () => {
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
   });
 
+  test("remounts an untouched lesson length immediately without manufacturing a result", async () => {
+    vi.useFakeTimers();
+    const text = Array.from(
+      { length: 25 },
+      (_, index) => String.fromCharCode("a".charCodeAt(0) + index).repeat(10)
+    ).join(" ");
+    const parsed = book(text);
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", text.length));
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+
+    const handle = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    const oldRoot = host.querySelector<HTMLElement>(".scr-root")!;
+    const oldFragmentChars = oldRoot.querySelectorAll(".scr-char").length;
+
+    const lessonLength = host.querySelector<HTMLSelectElement>(
+      ".reader-lesson-length-select"
+    )!;
+    lessonLength.focus();
+    lessonLength.value = "200";
+    lessonLength.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 16; i += 1) await Promise.resolve();
+
+    const newRoot = host.querySelector<HTMLElement>(".scr-root")!;
+    const newInput = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    expect(newRoot).not.toBe(oldRoot);
+    expect(newRoot.querySelectorAll(".scr-char").length).toBeGreaterThan(oldFragmentChars);
+    expect(newRoot.querySelectorAll(".scr-char--correct")).toHaveLength(0);
+    expect(document.activeElement).toBe(newInput);
+    expect(lessonLength.value).toBe("200");
+    expect(host.querySelector(".reader-session-results")).toBeNull();
+    expect(storage.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ lessonLength: 200 })
+    );
+
+    let snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(0);
+    expect(snapshots.at(-1)?.position).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 0,
+    });
+
+    // The remounted lesson is idle; the ten-second gap belongs to no result.
+    await vi.advanceTimersByTimeAsync(10_000);
+    newInput.dispatchEvent(new KeyboardEvent("keydown", { key: text[0]!, bubbles: true }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle.unmount?.();
+    handle.unmount?.();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 16; i += 1) await Promise.resolve();
+
+    snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    const latest = snapshots.at(-1)!;
+    expect(latest.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 1 });
+    expect(latest.lifetime).toEqual({
+      charsTyped: 1,
+      errors: 0,
+      timeMs: 1_000,
+      sessions: 1,
+    });
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    host.remove();
+  });
+
+  test("defers an active lesson length change without rebuilding or committing the run", async () => {
+    vi.useFakeTimers();
+    const text = Array.from(
+      { length: 30 },
+      (_, index) => String.fromCharCode("a".charCodeAt(0) + (index % 26)).repeat(10)
+    ).join(" ");
+    const parsed = book(text);
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", text.length));
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+
+    const handle = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    const root = host.querySelector<HTMLElement>(".scr-root")!;
+    const input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    const oldFragmentChars = root.querySelectorAll(".scr-char").length;
+    const press = (key: string) =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+    press(text[0]!);
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (let index = 1; index < 10; index += 1) press(text[index]!);
+    const lessonLength = host.querySelector<HTMLSelectElement>(
+      ".reader-lesson-length-select"
+    )!;
+    lessonLength.focus();
+    lessonLength.value = "150";
+    lessonLength.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+    expect(host.querySelector(".scr-root")).toBe(root);
+    expect(host.querySelector(".scr-hidden-input")).toBe(input);
+    expect(root.querySelectorAll(".scr-char--correct")).toHaveLength(10);
+    expect(document.activeElement).toBe(input);
+    expect(document.querySelector(".toast:last-child")?.textContent).toBe(
+      "150 chars from next lesson"
+    );
+    expect(storage.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ lessonLength: 150 })
+    );
+    let snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(0);
+
+    for (let index = 10; index < 110; index += 1) press(text[index]!);
+    expect(host.querySelector(".scr-root")).toBe(root);
+    expect(root.querySelectorAll(".scr-char").length).toBeGreaterThan(oldFragmentChars);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    expect(snapshots.at(-1)?.position).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 110,
+    });
+
+    handle.unmount?.();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    snapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    host.remove();
+  });
+
   test("persists two rolling lessons exactly once and keeps the latest score through idle handoff", async () => {
     vi.useFakeTimers();
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false, showLiveWpm: false });
     const text = Array.from(
-      { length: 21 },
+      // Keep the second target away from the paragraph end so semantic
+      // lesson planning does not correctly carry it through the final word.
+      { length: 31 },
       (_, index) => String.fromCharCode("a".charCodeAt(0) + index).repeat(10)
     ).join(" ");
     const parsed = book(text);
@@ -205,6 +385,10 @@ describe("mountReader", () => {
     await Promise.resolve();
     const input = host.querySelector(".scr-hidden-input")!;
     const liveStats = host.querySelector<HTMLElement>(".reader-live-stats")!;
+    const announcement = host.querySelector<HTMLElement>(
+      ".reader-checkpoint-announcement"
+    )!;
+    expect(announcement.textContent).toBe("");
     expect(liveStats.hidden).toBe(true);
     const press = (key: string) =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
@@ -215,6 +399,7 @@ describe("mountReader", () => {
     press(text[0]!);
     await vi.advanceTimersByTimeAsync(1_000);
     for (let index = 1; index < 110; index += 1) press(text[index]!);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(host.querySelector(".reader-session-results")).toBeNull();
     expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
@@ -222,6 +407,12 @@ describe("mountReader", () => {
     const firstResult = host.querySelector(".reader-live-stats")?.textContent;
     expect(firstResult).toContain("1320 wpm");
     expect(liveStats.hidden).toBe(false);
+    expect(
+      host.querySelector(".reader-checkpoint-announcement")?.textContent
+    ).toBe("Lesson complete: 1320 WPM, 100% accuracy. Next passage.");
+    expect(liveStats.classList).toContain("reader-live-stats-complete");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(liveStats.classList).not.toContain("reader-live-stats-complete");
 
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
     let snapshots = (
@@ -231,11 +422,15 @@ describe("mountReader", () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
+    expect(announcement.textContent).toBe(
+      "Lesson complete: 1320 WPM, 100% accuracy. Next passage."
+    );
     press(text[110]!);
     expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(host.querySelector(".reader-live-stats")?.textContent).toBe(firstResult);
     for (let index = 111; index < 220; index += 1) press(text[index]!);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(host.querySelector(".reader-session-results")).toBeNull();
     expect(host.textContent).not.toContain("session paused");
@@ -243,6 +438,9 @@ describe("mountReader", () => {
     const secondResult = host.querySelector(".reader-live-stats")?.textContent;
     expect(secondResult).toContain("660 wpm");
     expect(secondResult).not.toBe(firstResult);
+    expect(
+      host.querySelector(".reader-checkpoint-announcement")?.textContent
+    ).toBe("Lesson complete: 660 WPM, 100% accuracy. Next passage.");
 
     // A completed lesson is durable before route teardown (crash/reload
     // boundary), not deferred until the whole reader session finishes.
@@ -358,6 +556,11 @@ describe("mountReader", () => {
     host.querySelector(".scr-hidden-input")!.dispatchEvent(
       new KeyboardEvent("keydown", { key: "a", bubbles: true })
     );
+    const originalRoot = host.querySelector(".scr-root")!;
+    const originalSpan = host.querySelector(".scr-char")!;
+    const originalCaret = host.querySelector(".scr-caret")!;
+    const originalStats = host.querySelector(".reader-live-stats")?.textContent;
+    const originalCorrectCount = host.querySelectorAll(".scr-char--correct").length;
     const contentsControl = host.querySelector(
       ".reader-contents-control"
     ) as HTMLButtonElement;
@@ -373,11 +576,36 @@ describe("mountReader", () => {
     expect(items[1]?.querySelector(".reader-contents-order")?.textContent).toBe("02");
     expect(items[0]?.getAttribute("aria-current")).toBe("location");
     expect(items[0]?.textContent).toContain("current · 50%");
+    expect(host.hasAttribute("inert")).toBe(true);
+    expect(host.getAttribute("aria-hidden")).toBe("true");
+    expect(host.querySelector(".scr-root")).toBe(originalRoot);
+    expect(host.querySelector(".scr-char")).toBe(originalSpan);
+    expect(host.querySelector(".scr-caret")).toBe(originalCaret);
+    expect(host.querySelector(".reader-live-stats")?.textContent).toBe(originalStats);
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(originalCorrectCount);
+
+    const dialogButtons = [...dialog.querySelectorAll<HTMLButtonElement>("button")];
+    dialogButtons.at(-1)!.focus();
+    dialogButtons.at(-1)!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })
+    );
+    expect(document.activeElement).toBe(dialogButtons[0]);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(contentsControl);
-    expect(host.textContent).toContain("session paused");
+    expect(host.hasAttribute("inert")).toBe(false);
+    expect(host.hasAttribute("aria-hidden")).toBe(false);
+    expect(host.querySelector(".reader-session-results")).toBeNull();
+    expect(host.querySelector(".scr-root")).toBe(originalRoot);
+    expect(host.querySelector(".scr-char")).toBe(originalSpan);
+    expect(host.querySelector(".scr-caret")).toBe(originalCaret);
+    let interimSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(
+      interimSnapshots.every((snapshot) => snapshot.lifetime.sessions === 0)
+    ).toBe(true);
 
     contentsControl.click();
     const chapterTwo = [...document.querySelectorAll<HTMLButtonElement>(".reader-contents-item")].find(
@@ -406,6 +634,7 @@ describe("mountReader", () => {
     );
     expect(outgoingIndex).toBeGreaterThanOrEqual(0);
     expect(targetIndex).toBeGreaterThan(outgoingIndex);
+    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
     handle.unmount?.();
     host.remove();
   });

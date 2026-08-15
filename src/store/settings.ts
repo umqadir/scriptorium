@@ -5,6 +5,7 @@
  */
 import {
   DEFAULT_SETTINGS,
+  normalizeLessonLength,
   normalizeVisibleLineCount,
   type Settings,
 } from "../types";
@@ -70,6 +71,7 @@ export function mergeSettings(partial: Partial<Settings> | null | undefined): Se
         ? partial.showLiveWpm
         : DEFAULT_SETTINGS.showLiveWpm,
     contextLines: normalizeVisibleLineCount(partial.contextLines),
+    lessonLength: normalizeLessonLength(partial.lessonLength),
   };
 }
 

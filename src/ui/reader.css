@@ -13,6 +13,26 @@
   gap: 0.4rem;
 }
 
+.reader-lesson-length-control {
+  display: inline-flex;
+}
+
+.reader-lesson-length-select {
+  width: auto;
+  min-width: 5.5rem;
+  padding: 0.5rem 1.6rem 0.5rem 0.6rem;
+  color: var(--sub-color);
+  background-color: transparent;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.reader-lesson-length-select:hover,
+.reader-lesson-length-select:focus-visible {
+  color: var(--text-color);
+  background-color: var(--sub-alt-color);
+}
+
 .reader-contents-control {
   padding: 0.5rem 0.65rem;
   color: var(--sub-color);
@@ -51,6 +71,27 @@
 
 .reader-live-stats[hidden] {
   display: none;
+}
+
+.reader-live-stats-complete {
+  animation: reader-live-stats-complete 200ms ease-out;
+}
+
+@keyframes reader-live-stats-complete {
+  from {
+    opacity: 0.7;
+    transform: translateY(0.08rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-live-stats-complete {
+    animation: none;
+  }
 }
 
 /* Explicit placement keeps the typing surface on the same row while the
@@ -320,7 +361,11 @@
   margin-top: 0.5rem;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 640px) {
+  .reader-workspace {
+    padding-top: clamp(1.5rem, 5dvh, 2.5rem);
+  }
+
   .reader-topbar {
     grid-template-areas:
       "leading trailing"
@@ -344,6 +389,18 @@
 
   .reader-actions {
     gap: 0.2rem;
+  }
+
+  .reader-lesson-length-select {
+    min-width: 5rem;
+    min-height: 2.75rem;
+    padding-inline: 0.4rem 1.2rem;
+  }
+
+  .reader-topbar .icon-button,
+  .reader-contents-control {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
   }
 
   .reader-contents-control {

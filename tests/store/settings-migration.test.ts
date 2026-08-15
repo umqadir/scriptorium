@@ -35,6 +35,20 @@ describe("legacy default font-size migration", () => {
     expect(getSettingsSync().fontSize).toBe(2);
   });
 
+  test("defaults an older persisted record that predates lesson length", async () => {
+    const { lessonLength: _missing, ...legacySettings } = DEFAULT_SETTINGS;
+    mocks.stored = {
+      ...legacySettings,
+      __settingsMigrationVersion: 1,
+    };
+
+    await expect(getSettings()).resolves.toMatchObject({ lessonLength: 100 });
+    expect(mocks.put).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY)!).lessonLength,
+    ).toBe(100);
+  });
+
   test("migrates the localStorage mirror for first paint without prematurely marking completion", () => {
     localStorage.setItem(
       LOCAL_STORAGE_KEY,

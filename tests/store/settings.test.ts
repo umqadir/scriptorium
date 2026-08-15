@@ -18,6 +18,7 @@ describe("mergeSettings", () => {
     expect(merged.stopOnError).toBe(DEFAULT_SETTINGS.stopOnError);
     expect(merged.foldAccents).toBe(DEFAULT_SETTINGS.foldAccents);
     expect(merged.contextLines).toBe(DEFAULT_SETTINGS.contextLines);
+    expect(merged.lessonLength).toBe(DEFAULT_SETTINGS.lessonLength);
   });
 
   test("does not mutate the input object", () => {
@@ -51,6 +52,7 @@ describe("mergeSettings", () => {
       soundOnClick: null,
       showLiveWpm: {},
       contextLines: 2.5,
+      lessonLength: 137,
     } as never);
 
     expect(merged).toEqual({ ...DEFAULT_SETTINGS, theme: "future-theme" });
@@ -64,6 +66,17 @@ describe("mergeSettings", () => {
     for (const contextLines of [0, 1, 2.5, 9, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(mergeSettings({ contextLines }).contextLines).toBe(
         DEFAULT_SETTINGS.contextLines,
+      );
+    }
+  });
+
+  test("accepts only 100–200 lesson targets in 25-character steps", () => {
+    for (const lessonLength of [100, 125, 150, 175, 200]) {
+      expect(mergeSettings({ lessonLength }).lessonLength).toBe(lessonLength);
+    }
+    for (const lessonLength of [0, 99, 101, 137, 225, 150.5, Number.NaN, Infinity]) {
+      expect(mergeSettings({ lessonLength }).lessonLength).toBe(
+        DEFAULT_SETTINGS.lessonLength,
       );
     }
   });
@@ -87,6 +100,7 @@ describe("mergeSettings", () => {
       soundOnClick: true,
       showLiveWpm: false,
       contextLines: 5,
+      lessonLength: 175,
     };
     expect(mergeSettings(full)).toEqual(full);
   });

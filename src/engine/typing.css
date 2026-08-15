@@ -37,6 +37,24 @@
   min-width: 0;
 }
 
+/* Prose participates in the browser's normal inline formatting context.
+ * The bounded fragment is short enough to balance without hiding content;
+ * verse/headings retain source-line flex rows and are never balanced. */
+.scr-block--paragraph,
+.scr-block--blockquote {
+  display: block;
+  text-wrap: balance;
+}
+
+@media (max-width: 640px) {
+  .scr-block--paragraph,
+  .scr-block--blockquote {
+    /* Long narrow fragments can exceed browsers' balancing limit. Pretty
+     * wrapping still avoids avoidable orphans without over-reflowing input. */
+    text-wrap: pretty;
+  }
+}
+
 .scr-word {
   display: inline-flex;
   flex: none;

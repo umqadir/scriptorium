@@ -80,6 +80,36 @@ describe("renderWindow", () => {
     ).toBe("read this");
   });
 
+  test("keeps prose extras inside inline word wrappers without changing canonical spans", () => {
+    const host = document.createElement("div");
+    renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 0,
+          blockIndex: 0,
+          block: { kind: "paragraph", text: "read this" },
+        },
+      ],
+      () => "pending",
+      (_sectionIndex, _blockIndex, wordStart) =>
+        wordStart === 0 ? ["x"] : [],
+    );
+
+    expect(host.querySelector(".scr-block--paragraph")).not.toBeNull();
+    expect(
+      [...host.querySelectorAll<HTMLElement>(".scr-word")].map(
+        (word) => word.textContent,
+      ),
+    ).toEqual(["readx ", "this"]);
+    expect(host.querySelector(".scr-char--extra")?.textContent).toBe("x");
+    expect(
+      [...host.querySelectorAll<HTMLElement>(".scr-char:not(.scr-char--extra)")]
+        .map((span) => span.textContent)
+        .join(""),
+    ).toBe("read this");
+  });
+
   test("keeps source blocks as aligned rows without changing canonical spans", () => {
     const host = document.createElement("div");
     renderWindow(
@@ -206,6 +236,12 @@ describe("renderWindow", () => {
     const blockRule = typingCss.match(/\.scr-block\s*\{([^}]*)\}/s)?.[1] ?? "";
     expect(blockRule).not.toMatch(/^\s*width\s*:/m);
     expect(typingCss).toMatch(/\.scr-word\s*\{[^}]*flex:\s*none;/s);
+    expect(typingCss).toMatch(
+      /\.scr-block--paragraph,\s*\.scr-block--blockquote\s*\{[^}]*display:\s*block;[^}]*text-wrap:\s*balance;/s,
+    );
+    expect(typingCss).not.toMatch(
+      /\.scr-block--(?:verse|heading)[^{]*\{[^}]*text-wrap:\s*balance;/s,
+    );
     expect(typingCss).toMatch(
       /\.scr-viewport\s*\{[^}]*overflow:\s*visible;[^}]*height:\s*auto;/s,
     );

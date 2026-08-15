@@ -284,6 +284,21 @@ describe("isBookProgress / sanitizeSyncPayload", () => {
 });
 
 describe("sync privacy allowlist", () => {
+  test("sanitizes missing or invalid lesson targets through the settings allowlist", () => {
+    const { lessonLength: _omitted, ...legacySettings } = DEFAULT_SETTINGS;
+    const legacy = sanitizeSyncPayload({
+      ...payload(),
+      settings: legacySettings,
+    });
+    const invalid = sanitizeSyncPayload({
+      ...payload(),
+      settings: { ...DEFAULT_SETTINGS, lessonLength: 137 },
+    });
+
+    expect(legacy.settings.lessonLength).toBe(100);
+    expect(invalid.settings.lessonLength).toBe(100);
+  });
+
   test("sanitize and serialize strip unknown fields at every level", () => {
     const sentinel = "PRIVATE_BOOK_TEXT_SENTINEL_41f725ca";
     const raw = {

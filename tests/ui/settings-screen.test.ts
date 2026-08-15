@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { DEFAULT_SETTINGS, type Settings } from "../../src/types";
+import { DEFAULT_SETTINGS, type Settings, type SyncPayload } from "../../src/types";
 import { themeNames } from "../../src/themes";
 
 const mocks = vi.hoisted(() => {
@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     appState,
     listeners,
     download: vi.fn(),
+    parseSyncPayloadFile: vi.fn(),
     listBooks: vi.fn(async () => []),
     listProgress: vi.fn(async () => []),
     saveProgress: vi.fn(async () => undefined),
@@ -40,6 +41,7 @@ vi.mock("../../src/store/sync", async (importOriginal) => {
   return {
     ...actual,
     downloadSyncPayload: mocks.download,
+    parseSyncPayloadFile: mocks.parseSyncPayloadFile,
   };
 });
 vi.mock("../../src/ui/toast", () => ({ showToast: vi.fn() }));
@@ -54,6 +56,7 @@ describe("settings screen", () => {
     mocks.appState.settings = { ...DEFAULT_SETTINGS };
     mocks.appState.updateSettings.mockClear();
     mocks.download.mockClear();
+    mocks.parseSyncPayloadFile.mockReset();
     mocks.listBooks.mockReset();
     mocks.listBooks.mockResolvedValue([]);
     mocks.listProgress.mockReset();
@@ -81,6 +84,16 @@ describe("settings screen", () => {
     expect(container.querySelector('input[aria-label="Reader font size"]')).not.toBeNull();
     expect(container.querySelector('[role="group"][aria-label="Caret style"]')).not.toBeNull();
     expect(container.querySelector('select[aria-label="Stop on error behavior"]')).not.toBeNull();
+    const lessonLength = container.querySelector<HTMLInputElement>('input[aria-label="Lesson length"]');
+    expect(lessonLength?.min).toBe("100");
+    expect(lessonLength?.max).toBe("200");
+    expect(lessonLength?.step).toBe("25");
+    expect(lessonLength?.value).toBe("100");
+    if (!lessonLength) throw new Error("lesson length control missing");
+    lessonLength.value = "175";
+    lessonLength.dispatchEvent(new Event("input"));
+    expect(mocks.appState.updateSettings).toHaveBeenCalledWith({ lessonLength: 175 });
+    expect(lessonLength.value).toBe("175");
     expect(container.querySelector('input[aria-label="Visible lines"]')).toBeNull();
     expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(4);
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Theme"]')?.value).toBe("serika_dark");
@@ -108,6 +121,33 @@ describe("settings screen", () => {
     const payload = mocks.download.mock.calls[0]?.[0];
     expect(payload.knownBooks).toEqual({ "book-1": { title: "A title", author: "An author" } });
     expect(JSON.stringify(payload)).not.toContain("BOOK TEXT MUST STAY LOCAL");
+  });
+
+  test("normalizes an invalid imported lesson length to the default", async () => {
+    const remote: SyncPayload = {
+      version: 1,
+      updatedAt: Date.now(),
+      progress: {},
+      knownBooks: {},
+      settings: { ...DEFAULT_SETTINGS, lessonLength: 137 },
+    };
+    mocks.parseSyncPayloadFile.mockResolvedValue(remote);
+    const container = document.createElement("main");
+    mountSettings(container);
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!fileInput) throw new Error("sync file input missing");
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new File(["{}"], "sync.json", { type: "application/json" })],
+    });
+
+    fileInput.dispatchEvent(new Event("change"));
+
+    await vi.waitFor(() => {
+      expect(mocks.appState.updateSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ lessonLength: 100 })
+      );
+    });
   });
 
   test("keeps sync local with JSON controls and no Gist workflow", () => {

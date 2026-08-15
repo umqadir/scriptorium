@@ -51,10 +51,9 @@ export function canonicalNonSpaceCharsAt(
   return entry.base + entry.prefix[charIndex]!;
 }
 
-/** Canonical exclusive end of a finite lesson beginning at `start`.
- * A lesson stops after the first space reached with the target number of
- * non-space characters, or after the Enter boundary whose completed block
- * reaches the target. If neither occurs, the final book position is used. */
+/** Deterministic semantic end of a finite lesson. Atomic verse/headings are
+ * never split. Prose prefers a nearby source-block end, then a sentence end,
+ * and otherwise the first whole-word boundary at quota. */
 export function findLessonEnd(
   book: ParsedBook,
   start: Position,
@@ -68,26 +67,97 @@ export function findLessonEnd(
       ? Math.floor(targetNonSpaceChars)
       : 1,
   );
+  const maxOvershoot = Math.min(25, Math.ceil(target * 0.2));
+  const overshootLimit = target + maxOvershoot;
   let nonSpaceChars = 0;
+  let fallback: Position | null = null;
+  let sentenceBoundary: Position | null = null;
+  const startPosition = position;
+  const startsWithHeading =
+    book.sections[position.sectionIndex]?.blocks[position.blockIndex]?.kind ===
+    "heading";
 
   while (true) {
     const block = book.sections[position.sectionIndex]?.blocks[position.blockIndex];
     if (!block) return position;
+    const atomicBlock = block.kind === "verse" || block.kind === "heading";
+    let wordStart = getWordStart(block.text, position.charIndex);
     for (let charIndex = position.charIndex; charIndex < block.text.length; charIndex++) {
       const char = block.text[charIndex]!;
       if (char !== " ") nonSpaceChars += 1;
-      if (char === " " && nonSpaceChars >= target) {
-        return { ...position, charIndex: charIndex + 1 };
+      if (
+        !atomicBlock &&
+        fallback !== null &&
+        nonSpaceChars > overshootLimit
+      ) {
+        return sentenceBoundary ?? fallback;
+      }
+      if (!atomicBlock && char === " ") {
+        const boundary = { ...position, charIndex: charIndex + 1 };
+        if (nonSpaceChars >= target) {
+          fallback ??= boundary;
+          if (
+            nonSpaceChars <= overshootLimit &&
+            sentenceBoundary === null &&
+            wordEndsSentence(block.text.slice(wordStart, charIndex))
+          ) {
+            sentenceBoundary = boundary;
+          }
+          if (nonSpaceChars > overshootLimit) {
+            return sentenceBoundary ?? fallback;
+          }
+        }
+        wordStart = charIndex + 1;
       }
     }
 
     const next = findNextBlock(book, position.sectionIndex, position.blockIndex);
-    if (!next) return { ...position, charIndex: block.text.length };
-    // The pilcrow/Enter is a natural boundary and belongs to this lesson;
-    // its exclusive end is the next block's canonical zero position.
-    if (nonSpaceChars >= target) return { ...next, charIndex: 0 };
+    const blockEnd = next
+      ? { ...next, charIndex: 0 }
+      : { ...position, charIndex: block.text.length };
+    if (nonSpaceChars >= target) {
+      if (atomicBlock) {
+        const isStartingHeading =
+          startsWithHeading &&
+          position.sectionIndex === startPosition.sectionIndex &&
+          position.blockIndex === startPosition.blockIndex;
+        if (isStartingHeading && next) return headingCarryEnd(book, next);
+        return blockEnd;
+      }
+
+      fallback ??= blockEnd;
+      // A source block end inside the bounded prose window outranks an
+      // earlier sentence boundary; beyond it, fall back without scanning the
+      // rest of an arbitrarily long source block.
+      if (nonSpaceChars <= overshootLimit) return blockEnd;
+      return sentenceBoundary ?? fallback;
+    }
+    if (!next) return blockEnd;
     position = { ...next, charIndex: 0 };
   }
+}
+
+function headingCarryEnd(
+  book: ParsedBook,
+  location: { sectionIndex: number; blockIndex: number },
+): Position {
+  const block = book.sections[location.sectionIndex]?.blocks[location.blockIndex];
+  if (!block) return { ...location, charIndex: 0 };
+  const next = findNextBlock(book, location.sectionIndex, location.blockIndex);
+  if (block.kind === "verse" || block.kind === "heading") {
+    return next
+      ? { ...next, charIndex: 0 }
+      : { ...location, charIndex: block.text.length };
+  }
+  const firstSpace = block.text.indexOf(" ");
+  if (firstSpace !== -1) return { ...location, charIndex: firstSpace + 1 };
+  return next
+    ? { ...next, charIndex: 0 }
+    : { ...location, charIndex: block.text.length };
+}
+
+function wordEndsSentence(word: string): boolean {
+  return /[.!?]["'”’\)\]\}]*$/.test(word);
 }
 
 function nonNegativeInteger(value: number): number {

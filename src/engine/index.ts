@@ -15,6 +15,10 @@ import type {
   SessionStats,
 } from "../types";
 import {
+  DEFAULT_LESSON_LENGTH,
+  normalizeLessonLength,
+} from "../types";
+import {
   calculateWpm,
   calculateAccuracy,
   calculateConsistency,
@@ -80,7 +84,8 @@ export type TypingSessionOptions = {
 const PROGRESS_DEBOUNCE_MS = 1000;
 const SAMPLE_INTERVAL_MS = 1000;
 const STATS_INTERVAL_MS = 250;
-export const LESSON_TARGET_NON_SPACE_CHARS = 100;
+/** @deprecated Use DEFAULT_LESSON_LENGTH from src/types. */
+export const LESSON_TARGET_NON_SPACE_CHARS = DEFAULT_LESSON_LENGTH;
 
 export class TypingSession {
   private readonly opts: TypingSessionOptions;
@@ -92,8 +97,12 @@ export class TypingSession {
   private position: Position;
   /** Exact canonical floor for the active discrete lesson. */
   private lessonStartPosition: Position;
+  /** Editable visual-context floor; may precede a mid-word saved start. */
+  private lessonBackspaceFloorPosition: Position;
   /** Canonical exclusive end; text beyond this is not mounted. */
   private lessonEndPosition: Position;
+  /** Frozen target for the active lesson; live settings apply next lesson. */
+  private lessonTargetNonSpaceChars: number;
   private lessonStartNonSpaceChars: number;
 
   private readonly blockStates = new Map<string, BlockState>();
@@ -132,6 +141,7 @@ export class TypingSession {
   private onCompositionStart: (() => void) | null = null;
   private onCompositionEnd: ((e: CompositionEvent) => void) | null = null;
   private onPaste: ((e: ClipboardEvent) => void) | null = null;
+  private onFocus: (() => void) | null = null;
   private onBlur: ((e: FocusEvent) => void) | null = null;
   private onContainerClick: ((e: MouseEvent) => void) | null = null;
 
@@ -150,10 +160,12 @@ export class TypingSession {
     };
     this.position = normalizePosition(this.book, start);
     this.lessonStartPosition = this.position;
+    this.lessonBackspaceFloorPosition = this.wordFloorAt(this.position);
+    this.lessonTargetNonSpaceChars = this.lessonLength();
     this.lessonEndPosition = findLessonEnd(
       this.book,
       this.lessonStartPosition,
-      LESSON_TARGET_NON_SPACE_CHARS,
+      this.lessonTargetNonSpaceChars,
     );
     this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(this.position);
     this.finished = !hasTypeableContent(this.book);
@@ -168,7 +180,7 @@ export class TypingSession {
     this.dom = buildDom(this.container, this.settings);
     this.attachListeners();
     this.rebuildRenderWindow();
-    this.updateCaret();
+    this.hideCaret();
     this.focusInput();
   }
 
@@ -177,6 +189,7 @@ export class TypingSession {
     this.pausedExplicitly = true;
     this.clock.pause();
     this.stopActivityTimers();
+    this.hideCaret();
   }
 
   resume(): void {
@@ -216,6 +229,7 @@ export class TypingSession {
         input.removeEventListener("compositionend", this.onCompositionEnd);
       }
       if (this.onPaste) input.removeEventListener("paste", this.onPaste);
+      if (this.onFocus) input.removeEventListener("focus", this.onFocus);
       if (this.onBlur) input.removeEventListener("blur", this.onBlur);
       if (dom.rootEl.parentNode) dom.rootEl.parentNode.removeChild(dom.rootEl);
     }
@@ -229,6 +243,7 @@ export class TypingSession {
     this.onCompositionStart = null;
     this.onCompositionEnd = null;
     this.onPaste = null;
+    this.onFocus = null;
     this.onBlur = null;
     this.onContainerClick = null;
     this.boundaryErrors.clear();
@@ -262,10 +277,12 @@ export class TypingSession {
     this.position = normalized;
     this.resetLessonScore();
     this.lessonStartPosition = normalized;
+    this.lessonBackspaceFloorPosition = this.wordFloorAt(normalized);
+    this.lessonTargetNonSpaceChars = this.lessonLength();
     this.lessonEndPosition = findLessonEnd(
       this.book,
       normalized,
-      LESSON_TARGET_NON_SPACE_CHARS,
+      this.lessonTargetNonSpaceChars,
     );
     this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(normalized);
     this.finished = !hasTypeableContent(this.book);
@@ -280,6 +297,10 @@ export class TypingSession {
 
   applySettings(settings: Settings): void {
     if (this.destroyed) return;
+    // The current finite bound is deliberately frozen. An immediate lesson
+    // length change requires the owner to commit this partial run, destroy,
+    // and recreate at getPosition(); otherwise the new size begins at the
+    // next natural lesson handoff without losing score or progress.
     this.settings = settings;
     if (!this.dom) return;
     applyFont(this.dom.rootEl, settings);
@@ -422,15 +443,33 @@ export class TypingSession {
       e.preventDefault();
       this.clearHiddenInput();
     };
+    this.onFocus = () => {
+      if (this.destroyed || this.pausedExplicitly || this.finished) {
+        this.hideCaret();
+        return;
+      }
+      this.updateCaret();
+    };
     this.onBlur = (event: FocusEvent) => {
+      this.hideCaret();
       if (this.destroyed || this.pausedExplicitly || this.finished) return;
       const next = event.relatedTarget;
       if (next instanceof Element && this.isInteractiveElement(next)) return;
       this.blurRefocusTimer = setTimeout(() => {
         this.blurRefocusTimer = null;
-        if (!this.destroyed && !this.pausedExplicitly && !this.finished) {
-          this.focusInput();
+        if (this.destroyed || this.pausedExplicitly || this.finished) return;
+        // Native selects may report a null relatedTarget and install their
+        // focus only after blur dispatch. Decide from the settled active
+        // element so the fallback cannot steal focus or reveal two carets.
+        const active = document.activeElement;
+        if (
+          active instanceof Element &&
+          active !== input &&
+          this.isInteractiveElement(active)
+        ) {
+          return;
         }
+        this.focusInput();
       }, 0);
     };
     this.onContainerClick = (event: MouseEvent) => {
@@ -444,6 +483,7 @@ export class TypingSession {
     input.addEventListener("compositionstart", this.onCompositionStart);
     input.addEventListener("compositionend", this.onCompositionEnd);
     input.addEventListener("paste", this.onPaste);
+    input.addEventListener("focus", this.onFocus);
     input.addEventListener("blur", this.onBlur);
     this.container.addEventListener("click", this.onContainerClick);
   }
@@ -451,9 +491,9 @@ export class TypingSession {
   private focusInput(): void {
     if (!this.dom || this.pausedExplicitly || this.finished) return;
     try {
-      // Browser focus must never move the page or fight the renderer's
-      // deliberate three-line viewport position.
+      // Browser focus must never move the page away from the finite lesson.
       this.dom.hiddenInputEl.focus({ preventScroll: true });
+      if (document.activeElement === this.dom.hiddenInputEl) this.updateCaret();
     } catch {
       // ignore - focus can throw in odd/headless environments
     }
@@ -667,7 +707,7 @@ export class TypingSession {
 
   private performBackspaceStep(): void {
     const { sectionIndex, blockIndex, charIndex } = this.position;
-    if (this.isAtOrBeforeLessonStart(sectionIndex, blockIndex, charIndex)) {
+    if (this.isAtOrBeforeBackspaceFloor(sectionIndex, blockIndex, charIndex)) {
       return;
     }
     const block = this.getBlock(sectionIndex, blockIndex);
@@ -707,7 +747,7 @@ export class TypingSession {
     // charIndex === 0 and wordStart === 0: only the previous block's last
     // word can be crossed into.
     const prevLoc = findPreviousBlock(this.book, sectionIndex, blockIndex);
-    if (!prevLoc || this.isBlockBeforeLessonStart(prevLoc)) return;
+    if (!prevLoc || this.isBlockBeforeBackspaceFloor(prevLoc)) return;
     const prevBlock = this.getBlock(prevLoc.sectionIndex, prevLoc.blockIndex);
     if (!prevBlock) return;
     const prevText = prevBlock.text;
@@ -814,7 +854,16 @@ export class TypingSession {
   private emitLessonCheckpoint(force: boolean): boolean {
     const nonSpaceChars =
       this.nonSpaceCharsAt(this.position) - this.lessonStartNonSpaceChars;
-    if (!force && nonSpaceChars < LESSON_TARGET_NON_SPACE_CHARS) return false;
+    const atComposedEnd =
+      this.position.sectionIndex === this.lessonEndPosition.sectionIndex &&
+      this.position.blockIndex === this.lessonEndPosition.blockIndex &&
+      this.position.charIndex === this.lessonEndPosition.charIndex;
+    if (
+      !force &&
+      (!atComposedEnd || nonSpaceChars < this.lessonTargetNonSpaceChars)
+    ) {
+      return false;
+    }
     // Do not generate empty results after a threshold checkpoint happens to
     // coincide with the final canonical boundary.
     if (this.totalKeystrokes === 0) return false;
@@ -829,10 +878,12 @@ export class TypingSession {
     const position = this.getPosition();
     this.resetLessonScore();
     this.lessonStartPosition = position;
+    this.lessonBackspaceFloorPosition = this.wordFloorAt(position);
+    this.lessonTargetNonSpaceChars = this.lessonLength();
     this.lessonEndPosition = findLessonEnd(
       this.book,
       position,
-      LESSON_TARGET_NON_SPACE_CHARS,
+      this.lessonTargetNonSpaceChars,
     );
     this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(position);
     if (this.started && this.dom) {
@@ -950,21 +1001,21 @@ export class TypingSession {
     return isBefore ? "correct" : "pending";
   }
 
-  private isBlockBeforeLessonStart(loc: {
+  private isBlockBeforeBackspaceFloor(loc: {
     sectionIndex: number;
     blockIndex: number;
   }): boolean {
-    const s = this.lessonStartPosition;
+    const s = this.lessonBackspaceFloorPosition;
     if (loc.sectionIndex !== s.sectionIndex) return loc.sectionIndex < s.sectionIndex;
     return loc.blockIndex < s.blockIndex;
   }
 
-  private isAtOrBeforeLessonStart(
+  private isAtOrBeforeBackspaceFloor(
     sectionIndex: number,
     blockIndex: number,
     charIndex: number,
   ): boolean {
-    const start = this.lessonStartPosition;
+    const start = this.lessonBackspaceFloorPosition;
     if (sectionIndex !== start.sectionIndex) return sectionIndex < start.sectionIndex;
     if (blockIndex !== start.blockIndex) return blockIndex < start.blockIndex;
     return charIndex <= start.charIndex;
@@ -975,8 +1026,9 @@ export class TypingSession {
     if (!hasTypeableContent(this.book)) return result;
 
     // Mount exactly one finite lesson, even when it crosses EPUB sections.
-    // A resumed word prefix is visual context only; canonical keys and the
-    // Backspace/score floor remain at lessonStartPosition.
+    // A resumed word prefix uses canonical keys and is editable back to its
+    // rendered start; target accounting remains anchored at the exact saved
+    // lessonStartPosition.
     let location = {
       sectionIndex: this.lessonStartPosition.sectionIndex,
       blockIndex: this.lessonStartPosition.blockIndex,
@@ -1021,6 +1073,18 @@ export class TypingSession {
    * incrementally corrupting checkpoint accounting. */
   private nonSpaceCharsAt(position: Position): number {
     return canonicalNonSpaceCharsAt(this.canonicalNonSpaceIndex, position);
+  }
+
+  private lessonLength(): number {
+    return normalizeLessonLength(this.settings.lessonLength);
+  }
+
+  private wordFloorAt(position: Position): Position {
+    const block = this.getBlock(position.sectionIndex, position.blockIndex);
+    return {
+      ...position,
+      charIndex: block ? getWordStart(block.text, position.charIndex) : position.charIndex,
+    };
   }
 
   private rebuildRenderWindow(): void {
@@ -1071,8 +1135,26 @@ export class TypingSession {
   private updateCaret(): void {
     const dom = this.dom;
     if (!dom) return;
+    if (
+      this.pausedExplicitly ||
+      this.finished ||
+      document.activeElement !== dom.hiddenInputEl
+    ) {
+      this.hideCaret();
+      return;
+    }
+    dom.caretEl.style.visibility = "";
     const anchor = this.computeCaretAnchor();
     positionCaret(dom.caretEl, dom.viewportEl, anchor.span, this.settings.caretStyle, anchor.after);
+  }
+
+  private hideCaret(): void {
+    if (!this.dom) return;
+    // The caret's blink animation owns opacity and can override an inline
+    // opacity value. Visibility reliably suppresses it while a reader control
+    // owns focus; keep opacity for compatibility with the positioning helper.
+    this.dom.caretEl.style.visibility = "hidden";
+    this.dom.caretEl.style.opacity = "0";
   }
 
   // ─────────────────────────────── timers ────────────────────────────────

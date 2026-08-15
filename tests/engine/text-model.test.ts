@@ -84,16 +84,82 @@ describe("canonical non-space index", () => {
 });
 
 describe("findLessonEnd", () => {
-  test("ends after the first post-target space and otherwise uses the final remainder", () => {
-    const text = `${"a".repeat(99)} bb future`;
+  test("uses the fallback when the next word exceeds the bounded overshoot", () => {
+    const fallback = `${"a".repeat(99)} b `;
+    const text = `${fallback}${"x".repeat(30)} future`;
     const book = makeBook([{ id: "one", blocks: [{ text }] }]);
 
     expect(
       findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
-    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 103 });
+    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: fallback.length });
     expect(
-      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 103 }, 100),
+      findLessonEnd(
+        book,
+        { sectionIndex: 0, blockIndex: 0, charIndex: fallback.length },
+        100,
+      ),
     ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: text.length });
+  });
+
+  test("prefers a source block end over an earlier sentence inside the window", () => {
+    const first = `${"a".repeat(99)} b end. short`;
+    const book = makeBook([
+      { id: "one", blocks: [{ text: first }, { text: "next lesson" }] },
+    ]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 1, charIndex: 0 });
+  });
+
+  test("prefers the first sentence boundary when no source end fits the window", () => {
+    const sentence = `${"a".repeat(99)} b end. `;
+    const text = `${sentence}${"x".repeat(30)} future`;
+    const book = makeBook([{ id: "one", blocks: [{ text }] }]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: sentence.length });
+  });
+
+  test.each([100, 200])("caps a %i target's prose scan at 20/25 extra characters", (target) => {
+    const fallback = `${"a".repeat(target - 1)} b `;
+    const text = `${fallback}${"x".repeat(30)} after`;
+    const book = makeBook([{ id: "one", blocks: [{ text }] }]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, target),
+    ).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: fallback.length });
+  });
+
+  test("never splits verse after reaching target", () => {
+    const verse = Array.from({ length: 26 }, () => "word").join(" ");
+    const book = makeBook([
+      {
+        id: "poem",
+        blocks: [{ text: verse, kind: "verse" }, { text: "after", kind: "paragraph" }],
+      },
+    ]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 1, charIndex: 0 });
+  });
+
+  test("carries an over-target starting heading into the following prose word", () => {
+    const book = makeBook([
+      {
+        id: "chapter",
+        blocks: [
+          { text: "H".repeat(120), kind: "heading" },
+          { text: "Opening prose continues", kind: "paragraph" },
+        ],
+      },
+    ]);
+
+    expect(
+      findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
+    ).toEqual({ sectionIndex: 0, blockIndex: 1, charIndex: 8 });
   });
 
   test("uses an Enter end across included sections and skips excluded or empty content", () => {

@@ -417,11 +417,194 @@ describe("explicit block boundaries", () => {
     session.destroy();
   });
 
+  test.each([100, 150, 200])(
+    "mounts no text beyond a %i-character lesson target",
+    (lessonLength) => {
+      const prefix = "a".repeat(lessonLength - 1);
+      const lessonText = `${prefix} bb `;
+      const session = new TypingSession({
+        book: makeBook([
+          {
+            id: "ch1",
+            blocks: [{ text: `${lessonText}${"x".repeat(30)} future lesson` }],
+          },
+        ]),
+        container,
+        settings: makeSettings({ lessonLength }),
+      });
+      session.start();
+
+      const mountedChars = [...container.querySelectorAll<HTMLElement>(".scr-char")]
+        .map((span) => span.textContent)
+        .join("");
+      expect(mountedChars).toBe(lessonText);
+      expect(container.querySelector(".scr-text")?.textContent).not.toContain(
+        "future lesson",
+      );
+      expect(container.querySelector<HTMLElement>(".scr-viewport")?.scrollTop).toBe(0);
+      session.destroy();
+    },
+  );
+
+  test("waits past the fallback for a preferred source block end", () => {
+    const first = `${"a".repeat(99)} b end. short`;
+    const lessons = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([
+        { id: "ch1", blocks: [{ text: first }, { text: "next lesson" }] },
+      ]),
+      container,
+      settings: makeSettings(),
+      onLessonComplete: lessons,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const originalBlock = container.querySelector(".scr-block");
+
+    typeText(input, `${"a".repeat(99)} b `);
+    expect(lessons).not.toHaveBeenCalled();
+    expect(container.querySelector(".scr-block")).toBe(originalBlock);
+    typeText(input, "end. short");
+    expect(lessons).not.toHaveBeenCalled();
+    pressEnter(input);
+
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(lessons.mock.calls[0]?.[1]).toEqual({
+      sectionIndex: 0,
+      blockIndex: 1,
+      charIndex: 0,
+    });
+    expect(container.querySelector(".scr-text")?.textContent).toBe("next lesson");
+    session.destroy();
+  });
+
+  test("uses a preferred sentence boundary and never mounts the overshoot word", () => {
+    const fallback = `${"a".repeat(99)} b `;
+    const sentenceTail = "end. ";
+    const future = `${"x".repeat(30)} future`;
+    const lessons = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([
+        { id: "ch1", blocks: [{ text: `${fallback}${sentenceTail}${future}` }] },
+      ]),
+      container,
+      settings: makeSettings(),
+      onLessonComplete: lessons,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    expect(container.querySelector(".scr-text")?.textContent).toBe(
+      `${fallback}${sentenceTail}`,
+    );
+    typeText(input, fallback);
+    expect(lessons).not.toHaveBeenCalled();
+    typeText(input, sentenceTail);
+
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".scr-text")?.textContent).toBe(future);
+    session.destroy();
+  });
+
+  test("mounts and completes a whole over-target verse line", () => {
+    const verse = Array.from({ length: 26 }, () => "word").join(" ");
+    const lessons = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([
+        {
+          id: "poem",
+          blocks: [
+            { text: verse, kind: "verse" },
+            { text: "after", kind: "paragraph" },
+          ],
+        },
+      ]),
+      container,
+      settings: makeSettings(),
+      onLessonComplete: lessons,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    expect(container.querySelector(".scr-text")?.textContent).toBe(`${verse}¶`);
+    expect(container.querySelector(".scr-text")?.textContent).not.toContain("after");
+    typeText(input, verse);
+    expect(lessons).not.toHaveBeenCalled();
+    pressEnter(input);
+
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".scr-text")?.textContent).toBe("after");
+    session.destroy();
+  });
+
+  test("carries an over-target starting heading into the first prose word", () => {
+    const heading = "H".repeat(120);
+    const session = new TypingSession({
+      book: makeBook([
+        {
+          id: "chapter",
+          blocks: [
+            { text: heading, kind: "heading" },
+            { text: "Opening prose continues", kind: "paragraph" },
+          ],
+        },
+      ]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+
+    expect(container.querySelectorAll(".scr-block")).toHaveLength(2);
+    expect(container.querySelector(".scr-text")?.textContent).toBe(
+      `${heading}¶Opening `,
+    );
+    expect(container.querySelector(".scr-text")?.textContent).not.toContain(
+      "prose continues",
+    );
+    session.destroy();
+  });
+
+  test("freezes an active bound and applies a changed target at the next handoff", () => {
+    const firstLesson = `${"a".repeat(99)} bb `;
+    const secondLesson = `${"c".repeat(199)} dd `;
+    const finalRemainder = `${"z".repeat(30)} tail`;
+    const lessons = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([
+        {
+          id: "ch1",
+          blocks: [{ text: `${firstLesson}${secondLesson}${finalRemainder}` }],
+        },
+      ]),
+      container,
+      settings: makeSettings({ lessonLength: 100 }),
+      onLessonComplete: lessons,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const textEl = container.querySelector<HTMLElement>(".scr-text")!;
+    const originalNode = textEl.firstElementChild;
+
+    typeText(input, firstLesson.slice(0, 10));
+    session.applySettings(makeSettings({ lessonLength: 200 }));
+    expect(textEl.textContent).toBe(firstLesson);
+    expect(textEl.firstElementChild).toBe(originalNode);
+    expect(session.getStats().charsTyped).toBe(10);
+
+    typeText(input, firstLesson.slice(10));
+    expect(lessons).toHaveBeenCalledTimes(1);
+    expect(lessons.mock.calls[0]?.[0].charsTyped).toBe(firstLesson.length);
+    expect(textEl.textContent).toBe(secondLesson);
+    expect(session.getStats()).toMatchObject({ charsTyped: 0, elapsedMs: 0 });
+    session.destroy();
+  });
+
   test("checkpoints long prose after the first post-target space and mounts zeroed next text", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const firstWord = "a".repeat(99);
-    const text = `${firstWord} bb tail`;
+    const remainder = "z".repeat(30);
+    const text = `${firstWord} bb ${remainder}`;
     const completed: Array<{
       stats: ReturnType<TypingSession["getStats"]>;
       position: ReturnType<TypingSession["getPosition"]>;
@@ -485,7 +668,7 @@ describe("explicit block boundaries", () => {
       stats: { charsTyped: 104, errors: 1, elapsedMs: 1_000 },
       position: { sectionIndex: 0, blockIndex: 0, charIndex: 103 },
       liveStats: { charsTyped: 0, errors: 0, elapsedMs: 0 },
-      mountedText: "tail",
+      mountedText: remainder,
       frozen: true,
     });
 
@@ -495,9 +678,9 @@ describe("explicit block boundaries", () => {
     expect(session.getPosition().charIndex).toBe(103);
     expect(session.getStats().charsTyped).toBe(0);
 
-    typeText(input, "tail");
+    typeText(input, remainder);
     expect(completed).toHaveLength(2);
-    expect(completed[1]?.stats).toMatchObject({ charsTyped: 4, errors: 0 });
+    expect(completed[1]?.stats).toMatchObject({ charsTyped: 30, errors: 0 });
     expect(onBookComplete).toHaveBeenCalledTimes(1);
     expect(eventOrder).toEqual(["lesson", "lesson", "book"]);
     // The previous immutable snapshot is not changed by the next lesson.
@@ -969,7 +1152,7 @@ describe("position and settings", () => {
     session.destroy();
   });
 
-  test("resume at a pilcrow shows the final word and keeps its exact deletion floor", () => {
+  test("resume at a pilcrow shows an editable final-word context", () => {
     const book = makeBook([
       { id: "ch1", blocks: [{ text: "first word" }, { text: "next" }] },
     ]);
@@ -999,9 +1182,53 @@ describe("position and settings", () => {
     expect(session.getPosition()).toEqual({
       sectionIndex: 0,
       blockIndex: 0,
-      charIndex: 10,
+      charIndex: 9,
     });
     expect(firstBlock.querySelector(".scr-boundary")?.textContent).toBe("¶");
+    session.destroy();
+  });
+
+  test("resume mid-word can edit to the rendered word start but no farther", () => {
+    const beforeCheckpoint = `hello ${"a".repeat(97)} `;
+    const checkpointTail = "b ";
+    const future = "x".repeat(30);
+    const onLessonComplete = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([
+        {
+          id: "ch1",
+          blocks: [{ text: `${beforeCheckpoint}${checkpointTail}${future}` }],
+        },
+      ]),
+      container,
+      settings: makeSettings(),
+      startAt: { sectionIndex: 0, blockIndex: 0, charIndex: 3 },
+      onLessonComplete,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    pressBackspace(input);
+    pressBackspace(input);
+    pressBackspace(input);
+    pressBackspace(input);
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 0,
+    });
+
+    typeText(input, beforeCheckpoint);
+    expect(session.getPosition().charIndex).toBe(beforeCheckpoint.length);
+    expect(onLessonComplete).not.toHaveBeenCalled();
+    typeText(input, checkpointTail);
+    expect(onLessonComplete).toHaveBeenCalledTimes(1);
+    expect(onLessonComplete.mock.calls[0]?.[1]).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: beforeCheckpoint.length + checkpointTail.length,
+    });
+    expect(container.querySelector(".scr-text")?.textContent).toBe(future);
     session.destroy();
   });
 
@@ -1170,11 +1397,16 @@ describe("lifecycle and traversal", () => {
     session.destroy();
   });
 
-  test("blur does not steal focus from interactive controls or while paused", () => {
+  test("caret follows typing focus without stealing interactive focus", () => {
     vi.useFakeTimers();
     const book = makeBook([{ id: "ch1", blocks: [{ text: "abc" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings() });
     session.start();
+    const input = getHiddenInput(container);
+    const caret = container.querySelector<HTMLElement>(".scr-caret")!;
+    expect(document.activeElement).toBe(input);
+    expect(caret.style.opacity).toBe("");
+    expect(caret.style.visibility).toBe("");
 
     const button = document.createElement("button");
     container.appendChild(button);
@@ -1182,14 +1414,72 @@ describe("lifecycle and traversal", () => {
     button.click(); // the container's bubbling click handler must also abstain
     vi.runOnlyPendingTimers();
     expect(document.activeElement).toBe(button);
+    expect(caret.style.opacity).toBe("0");
+    expect(caret.style.visibility).toBe("hidden");
 
-    getHiddenInput(container).focus();
+    input.focus();
+    expect(caret.style.opacity).toBe("");
     session.pause();
+    expect(caret.style.opacity).toBe("0");
     button.focus();
     vi.runOnlyPendingTimers();
     expect(document.activeElement).toBe(button);
+    expect(caret.style.opacity).toBe("0");
+
+    session.resume();
+    expect(document.activeElement).toBe(input);
+    expect(caret.style.opacity).toBe("");
 
     button.remove();
+    session.destroy();
+  });
+
+  test("non-interactive blur hides then restores the caret after automatic refocus", () => {
+    vi.useFakeTimers();
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "abc" }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const caret = container.querySelector<HTMLElement>(".scr-caret")!;
+
+    input.dispatchEvent(
+      new FocusEvent("blur", { relatedTarget: document.body }),
+    );
+    expect(caret.style.opacity).toBe("0");
+    vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(input);
+    expect(caret.style.opacity).toBe("");
+    session.destroy();
+  });
+
+  test("null-relatedTarget blur respects a select that gains focus before fallback", () => {
+    vi.useFakeTimers();
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "abc" }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const caret = container.querySelector<HTMLElement>(".scr-caret")!;
+    const select = document.createElement("select");
+    const option = document.createElement("option");
+    option.value = "100";
+    option.textContent = "100";
+    select.appendChild(option);
+    container.appendChild(select);
+
+    input.dispatchEvent(new FocusEvent("blur", { relatedTarget: null }));
+    select.focus();
+    expect(caret.style.opacity).toBe("0");
+    vi.runOnlyPendingTimers();
+
+    expect(document.activeElement).toBe(select);
+    expect(caret.style.opacity).toBe("0");
+    select.parentElement?.removeChild(select);
     session.destroy();
   });
 });

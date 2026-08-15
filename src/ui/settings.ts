@@ -1,4 +1,12 @@
-import { DEFAULT_SETTINGS, type Settings, type SyncPayload } from "../types";
+import {
+  DEFAULT_SETTINGS,
+  LESSON_LENGTH_STEP,
+  MAX_LESSON_LENGTH,
+  MIN_LESSON_LENGTH,
+  normalizeLessonLength,
+  type Settings,
+  type SyncPayload,
+} from "../types";
 import { listBooks } from "../store/books";
 import { listProgress, saveProgress } from "../store/progress";
 import { mergeSettings } from "../store/settings";
@@ -64,6 +72,7 @@ function normalizeImportedSettings(value: unknown): Settings {
     soundOnClick: typeof merged.soundOnClick === "boolean" ? merged.soundOnClick : DEFAULT_SETTINGS.soundOnClick,
     showLiveWpm: typeof merged.showLiveWpm === "boolean" ? merged.showLiveWpm : DEFAULT_SETTINGS.showLiveWpm,
     contextLines,
+    lessonLength: normalizeLessonLength(merged.lessonLength),
   };
 }
 
@@ -257,6 +266,25 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
   );
   errorSelect.value = appState.settings.stopOnError;
 
+  const lessonLengthValue = el("span", {}, `${appState.settings.lessonLength} chars`);
+  const lessonLengthInput = el("input", {
+    attrs: {
+      type: "range",
+      min: String(MIN_LESSON_LENGTH),
+      max: String(MAX_LESSON_LENGTH),
+      step: String(LESSON_LENGTH_STEP),
+      value: String(appState.settings.lessonLength),
+      "aria-label": "Lesson length",
+    },
+    on: {
+      input: () => {
+        const value = normalizeLessonLength(Number.parseInt(lessonLengthInput.value, 10));
+        lessonLengthValue.textContent = `${value} chars`;
+        savePatch({ lessonLength: value });
+      },
+    },
+  }) as HTMLInputElement;
+
   const smoothCaret = checkboxField({
     label: "smooth caret",
     help: "Animate the caret between characters.",
@@ -289,6 +317,11 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
     el(
       "div",
       { className: "settings-grid" },
+      field(
+        "lesson length",
+        el("div", { className: "field" }, lessonLengthInput, lessonLengthValue),
+        "Target characters; lessons finish at a nearby word, sentence, or source line."
+      ),
       field("caret", caretControl),
       field("errors", errorSelect, "Choose whether a wrong letter or word blocks progress."),
       smoothCaret.root,
@@ -411,6 +444,8 @@ export function mountSettings(container: HTMLElement): ScreenHandle {
     fontSizeInput.value = String(settings.fontSize);
     fontSizeValue.textContent = `${settings.fontSize.toFixed(1)} rem`;
     errorSelect.value = settings.stopOnError;
+    lessonLengthInput.value = String(settings.lessonLength);
+    lessonLengthValue.textContent = `${settings.lessonLength} chars`;
     smoothCaret.input.checked = settings.smoothCaret;
     foldAccents.input.checked = settings.foldAccents;
     soundOnClick.input.checked = settings.soundOnClick;

@@ -164,6 +164,24 @@ export const MIN_VISIBLE_LINE_COUNT = 2;
 export const MAX_VISIBLE_LINE_COUNT = 8;
 export const DEFAULT_VISIBLE_LINE_COUNT = 3;
 
+export const MIN_LESSON_LENGTH = 100;
+export const MAX_LESSON_LENGTH = 200;
+export const LESSON_LENGTH_STEP = 25;
+export const DEFAULT_LESSON_LENGTH = 100;
+
+/** Accept only the discrete lesson sizes exposed by Keybr's control. */
+export function normalizeLessonLength(value: unknown): number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_LESSON_LENGTH &&
+    value <= MAX_LESSON_LENGTH &&
+    (value - MIN_LESSON_LENGTH) % LESSON_LENGTH_STEP === 0
+  )
+    ? value
+    : DEFAULT_LESSON_LENGTH;
+}
+
 /** Validate the persisted/public line-count setting at the engine boundary. */
 export function normalizeVisibleLineCount(value: unknown): number {
   return (
@@ -187,8 +205,10 @@ export type Settings = {
   foldAccents: boolean;
   soundOnClick: boolean;
   showLiveWpm: boolean;
-  /** Physical typing rows visible at once. Integer from 2 through 8. */
+  /** Legacy persisted field; finite lessons now expand to their full height. */
   contextLines: number;
+  /** Canonical non-space character target per finite lesson. */
+  lessonLength: number;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -202,6 +222,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundOnClick: false,
   showLiveWpm: true,
   contextLines: DEFAULT_VISIBLE_LINE_COUNT,
+  lessonLength: DEFAULT_LESSON_LENGTH,
 };
 
 /**

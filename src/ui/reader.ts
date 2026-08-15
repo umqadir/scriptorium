@@ -12,6 +12,10 @@ import {
   saveProgress,
 } from "../store/progress";
 import {
+  LESSON_LENGTH_STEP,
+  MAX_LESSON_LENGTH,
+  MIN_LESSON_LENGTH,
+  normalizeLessonLength,
   type BookProgress,
   type ParsedBook,
   type Position,
@@ -42,6 +46,19 @@ const EMPTY_TOTALS: SessionTotals = {
 };
 
 const ACTIVE_READER_HINT = "enter at ¶ · esc to pause";
+const READER_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function focusableReaderElements(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(READER_FOCUSABLE_SELECTOR)).filter(
+    (node) => !node.hasAttribute("hidden") && node.getAttribute("aria-hidden") !== "true"
+  );
+}
 
 function sectionTitle(section: Section | undefined, index: number): string {
   return section?.title || `Section ${index + 1}`;
@@ -137,6 +154,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let audioContext: AudioContext | undefined;
   let overlayReturnFocus: HTMLElement | null = null;
   let overlayInterruptedSession = false;
+  let chooserBackground: Array<{
+    node: HTMLElement;
+    hadInert: boolean;
+    ariaHidden: string | null;
+  }> = [];
 
   const shell = el("section", { className: "reader-shell", attrs: { "aria-live": "off" } });
   const loading = el(
@@ -175,6 +197,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let statsEl: HTMLElement;
   let typingHost: HTMLElement;
   let hintEl: HTMLElement;
+  let lessonLengthSelectEl: HTMLSelectElement;
+  let checkpointAnnouncementEl: HTMLElement;
+  let checkpointPulseTimer: ReturnType<typeof setTimeout> | undefined;
   let latestStats: SessionStats | undefined;
   let latestCompletedStats: SessionStats | undefined;
 
@@ -361,28 +386,75 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     hintEl.textContent = "";
   };
 
-  const closeChooser = (showPausedResults = true): void => {
+  const pauseForChooser = (): Position | undefined => {
+    if (!session || !runtimeBook || !progress) return undefined;
+    session.pause();
+    const position = session.getPosition();
+    const stats = session.getStats();
+    persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
+    return position;
+  };
+
+  const installChooser = (
+    root: HTMLElement,
+    panel: HTMLElement,
+    initialFocus?: HTMLElement | null
+  ): void => {
+    chooser = root;
+    root.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusable = focusableReaderElements(panel);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === panel)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!panel.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    document.body.appendChild(root);
+    chooserBackground = Array.from(document.body.children)
+      .filter((node): node is HTMLElement => node instanceof HTMLElement && node !== root)
+      .map((node) => ({
+        node,
+        hadInert: node.hasAttribute("inert"),
+        ariaHidden: node.getAttribute("aria-hidden"),
+      }));
+    for (const entry of chooserBackground) {
+      entry.node.setAttribute("inert", "");
+      entry.node.setAttribute("aria-hidden", "true");
+    }
+    (initialFocus ?? focusableReaderElements(panel)[0] ?? panel).focus();
+  };
+
+  const closeChooser = (resumeTemporarySession = true): void => {
     const returnFocus = overlayReturnFocus;
     const interrupted = overlayInterruptedSession;
     chooser?.remove();
     chooser = null;
+    for (const entry of chooserBackground) {
+      if (!entry.hadInert) entry.node.removeAttribute("inert");
+      if (entry.ariaHidden === null) entry.node.removeAttribute("aria-hidden");
+      else entry.node.setAttribute("aria-hidden", entry.ariaHidden);
+    }
+    chooserBackground = [];
     overlayReturnFocus = null;
     overlayInterruptedSession = false;
-    if (showPausedResults && interrupted && !lifetimeFinalized) {
-      const hasScoredActivity =
-        routeTotals.charsTyped !== 0 ||
-        routeTotals.errors !== 0 ||
-        routeTotals.timeMs !== 0;
-      if (hasScoredActivity) {
-        renderSessionResults();
-      } else if (chooserResumePosition && runtimeBook) {
-        const resumeAt = chooserResumePosition;
-        chooserResumePosition = undefined;
-        pausedPosition = undefined;
-        startSession(resumeAt);
-        hintEl.textContent = ACTIVE_READER_HINT;
-        return;
-      }
+    if (resumeTemporarySession && interrupted && session && !lifetimeFinalized) {
+      session.resume();
+      chooserResumePosition = undefined;
+      hintEl.textContent = ACTIVE_READER_HINT;
     }
     returnFocus?.focus();
   };
@@ -425,6 +497,18 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         commitRun(stats, position, charsAtPosition(runtimeBook!, position));
         latestStats = stats;
         updateChrome(position, charsAtPosition(runtimeBook!, position), stats, true);
+        // This dedicated polite region receives one mutation per checkpoint;
+        // volatile timer updates intentionally never touch it.
+        checkpointAnnouncementEl.textContent = `Lesson complete: ${Math.round(stats.wpm)} WPM, ${formatPercent(stats.accuracy)} accuracy. Next passage.`;
+        statsEl.classList.remove("reader-live-stats-complete");
+        // Restart the restrained pulse even when two consecutive results are equal.
+        void statsEl.offsetWidth;
+        statsEl.classList.add("reader-live-stats-complete");
+        if (checkpointPulseTimer) clearTimeout(checkpointPulseTimer);
+        checkpointPulseTimer = setTimeout(() => {
+          statsEl.classList.remove("reader-live-stats-complete");
+          checkpointPulseTimer = undefined;
+        }, 200);
       },
       onSectionComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
@@ -559,9 +643,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (!runtimeBook || !progress) return;
     const wasFinalized = lifetimeFinalized;
     const target = { sectionIndex, blockIndex: 0, charIndex: 0 };
+    // Selecting a destination is the destructive navigation boundary. The
+    // temporarily paused run is committed exactly once here, not on open.
+    stopCurrentRun();
     closeChooser(false);
-    // Opening contents stops the active engine and queues its exact outgoing
-    // position. Do not start the new engine until that snapshot is durable.
+    // Do not start the destination engine until the outgoing snapshot is durable.
     await saveChain;
     if (cancelled) return;
     if (wasFinalized) {
@@ -579,11 +665,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   function openContents(returnFocus = document.activeElement as HTMLElement | null): void {
     if (!runtimeBook || !progress || chooser) return;
-    const stopped = stopCurrentRun();
-    const currentPosition = stopped?.position ?? pausedPosition ?? progress.position;
-    if (stopped) pausedPosition = stopped.position;
+    const paused = pauseForChooser();
+    const currentPosition = paused ?? pausedPosition ?? progress.position;
     chooserResumePosition = currentPosition;
-    overlayInterruptedSession = stopped !== undefined;
+    overlayInterruptedSession = paused !== undefined;
     overlayReturnFocus = returnFocus;
     shell.classList.remove("reader-focused");
 
@@ -630,7 +715,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       "div",
       {
         className: "reader-chooser-panel reader-contents-panel",
-        attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+        attrs: {
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": titleId,
+          tabindex: "-1",
+        },
       },
       el(
         "div",
@@ -670,7 +760,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         )
       )
     );
-    chooser = el(
+    const root = el(
       "div",
       {
         className: "reader-chooser-backdrop",
@@ -682,8 +772,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
       panel
     );
-    document.body.appendChild(chooser);
-    (currentButton ?? (panel.querySelector("button") as HTMLButtonElement | null))?.focus();
+    installChooser(
+      root,
+      panel,
+      currentButton ?? (panel.querySelector("button") as HTMLButtonElement | null)
+    );
   }
 
   function openInclusionEditor(
@@ -691,10 +784,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     inheritedInterruption = false
   ): void {
     if (!storedBook || !progress || chooser) return;
-    const stopped = stopCurrentRun();
-    chooserResumePosition = stopped?.position ?? pausedPosition;
-    if (stopped) pausedPosition = stopped.position;
-    overlayInterruptedSession = stopped !== undefined || inheritedInterruption;
+    const paused = inheritedInterruption ? chooserResumePosition : pauseForChooser();
+    chooserResumePosition = paused ?? pausedPosition ?? progress.position;
+    overlayInterruptedSession = paused !== undefined || inheritedInterruption;
     overlayReturnFocus = returnFocus;
     shell.classList.remove("reader-focused");
     const choices = new Map(
@@ -753,7 +845,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       "div",
       {
         className: "reader-chooser-panel",
-        attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+        attrs: {
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": titleId,
+          tabindex: "-1",
+        },
       },
       el(
         "div",
@@ -778,7 +875,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         applyButton
       )
     );
-    chooser = el("div", {
+    const root = el("div", {
       className: "reader-chooser-backdrop",
       on: {
         mousedown: (event: Event) => {
@@ -786,8 +883,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         },
       },
     }, panel);
-    document.body.appendChild(chooser);
-    (panel.querySelector("button") as HTMLButtonElement | null)?.focus();
+    installChooser(root, panel, panel.querySelector("button") as HTMLButtonElement | null);
   }
 
   const renderSessionResults = (): void => {
@@ -876,7 +972,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     accuracyValueEl = el("span", { className: "stat-value" }, "100%");
     statsEl = el(
       "div",
-      { className: "reader-live-stats", attrs: { "aria-live": "polite" } },
+      { className: "reader-live-stats" },
       el(
         "span",
         { className: "reader-live-stat" },
@@ -890,6 +986,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         el("span", { className: "stat-label" }, " accuracy")
       )
     );
+    checkpointAnnouncementEl = el("div", {
+      className: "visually-hidden reader-checkpoint-announcement",
+      attrs: { "aria-live": "polite", "aria-atomic": "true" },
+    });
     typingHost = el("div", {
       className: "typing-container",
       on: {
@@ -924,6 +1024,73 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
     });
     hintEl = el("p", { className: "reader-hint" }, ACTIVE_READER_HINT);
+    lessonLengthSelectEl = el(
+      "select",
+      {
+        className: "reader-lesson-length-select",
+        attrs: {
+          "aria-label": "Lesson length",
+          title: "Target length; lessons may finish at a nearby sentence or source line",
+        },
+        on: {
+          change: (event: Event) => {
+            const select = event.currentTarget as HTMLSelectElement;
+            const lessonLength = normalizeLessonLength(Number(select.value));
+            if (lessonLength === getAppState().settings.lessonLength) {
+              select.value = String(lessonLength);
+              return;
+            }
+            const current = session;
+            const currentStats = current?.getStats();
+            const hasActivity = (currentStats?.charsTyped ?? 0) > 0;
+            select.disabled = true;
+
+            const settingsUpdate = getAppState().updateSettings({ lessonLength });
+            if (hasActivity && current) {
+              // The engine freezes the active lesson target. Preserve this
+              // scored run and apply the new size at its natural handoff.
+              select.disabled = false;
+              showToast(`${lessonLength} chars from next lesson`);
+              current.resume();
+              void settingsUpdate.catch((error: unknown) => {
+                console.error("Failed to save lesson length", error);
+                if (!cancelled) showToast("Couldn't save the lesson length.", "error");
+              });
+              return;
+            }
+
+            void (async () => {
+              try {
+                await settingsUpdate;
+              } catch (error) {
+                console.error("Failed to save lesson length", error);
+                if (!cancelled) showToast("Couldn't save the lesson length.", "error");
+              }
+              // An untouched lesson has no result to preserve, so replace it
+              // immediately at the same canonical position.
+              const stopped = current && session === current ? stopCurrentRun() : undefined;
+              await saveChain;
+              if (cancelled) return;
+              select.disabled = false;
+              select.value = String(getAppState().settings.lessonLength);
+              if (stopped && !lifetimeFinalized) {
+                pausedPosition = undefined;
+                startSession(stopped.position);
+                hintEl.textContent = ACTIVE_READER_HINT;
+              }
+            })();
+          },
+        },
+      },
+      ...Array.from(
+        { length: (MAX_LESSON_LENGTH - MIN_LESSON_LENGTH) / LESSON_LENGTH_STEP + 1 },
+        (_, offset) => {
+          const value = MIN_LESSON_LENGTH + offset * LESSON_LENGTH_STEP;
+          return el("option", { attrs: { value } }, `${value} chars`);
+        }
+      )
+    );
+    lessonLengthSelectEl.value = String(getAppState().settings.lessonLength);
     const chrome = el(
       "div",
       {
@@ -951,6 +1118,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         el(
           "div",
           { className: "reader-actions reader-topbar-trailing" },
+          el(
+            "label",
+            { className: "reader-lesson-length-control" },
+            el("span", { className: "visually-hidden" }, "Lesson length"),
+            lessonLengthSelectEl
+          ),
           el(
             "button",
             {
@@ -981,7 +1154,8 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       { className: "reader-workspace" },
       statsEl,
       typingHost,
-      hintEl
+      hintEl,
+      checkpointAnnouncementEl
     );
     // Live scoring belongs to the same content axis as the text, outside the
     // fading navigation chrome so focused typing never hides enabled stats.
@@ -1068,6 +1242,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       unsubscribeSettings = getAppState().subscribe((settings) => {
         if (cancelled) return;
         session?.applySettings(settings);
+        lessonLengthSelectEl.value = String(settings.lessonLength);
         const shown = settings.showLiveWpm ? latestStats : latestCompletedStats;
         if (shown) {
           wpmValueEl.textContent = String(Math.round(shown.wpm));
@@ -1100,8 +1275,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       if (cancelled) return;
       cancelled = true;
       document.removeEventListener("keydown", onDocumentKeydown);
-      chooser?.remove();
-      chooser = null;
+      if (chooser) closeChooser(false);
       unsubscribeSettings?.();
       unsubscribeSettings = undefined;
       if (!lifetimeFinalized) finalizeLifetime(false);
@@ -1110,6 +1284,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         session = null;
       }
       if (audioContext) void audioContext.close();
+      if (checkpointPulseTimer) clearTimeout(checkpointPulseTimer);
     },
   };
 }
