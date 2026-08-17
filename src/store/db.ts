@@ -8,12 +8,14 @@
  * unit-testable business logic; the business logic lives in the sibling
  * modules and is tested there directly.
  *
- * Schema (version 1):
+ * Schema (version 2):
  *   - bookMeta: BookMeta, keyed by `id`. Small — this is what `listBooks`
  *     reads, so rendering the library never deserializes section text.
  *   - books: { sections: Section[]; raw: Blob }, keyed by `id`. Large —
  *     only touched when opening a book to read or re-parsing.
  *   - progress: BookProgress, keyed by `bookId`.
+ *   - lessonNavigation: LessonNavigationState, keyed by `bookId`. Local-only
+ *     reader history; deliberately excluded from sync payloads.
  *   - settings: a single Settings record under a fixed key.
  *   - syncConfig: a single record holding the optional Gist PAT + gist id
  *     (see src/store/sync.ts). Lives in IndexedDB, not localStorage, per
@@ -25,10 +27,16 @@
  * `meta.id`); splitting them physically is what makes `listBooks` cheap.
  */
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { BookMeta, BookProgress, Section, Settings } from "../types";
+import type {
+  BookMeta,
+  BookProgress,
+  LessonNavigationState,
+  Section,
+  Settings,
+} from "../types";
 
 export const DB_NAME = "scriptorium";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const SETTINGS_KEY = "singleton";
 export const SYNC_CONFIG_KEY = "singleton";
 
@@ -58,6 +66,10 @@ export interface ScriptoriumSchema extends DBSchema {
     key: string;
     value: BookProgress;
   };
+  lessonNavigation: {
+    key: string;
+    value: LessonNavigationState;
+  };
   settings: {
     key: string;
     value: Settings;
@@ -85,7 +97,9 @@ export function getDb(): Promise<ScriptoriumDB> {
           db.createObjectStore("settings");
           db.createObjectStore("syncConfig");
         }
-        // if (oldVersion < 2) { ...future migration... }
+        if (oldVersion < 2) {
+          db.createObjectStore("lessonNavigation");
+        }
       },
     });
   }

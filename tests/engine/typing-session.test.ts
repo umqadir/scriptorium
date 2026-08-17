@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { TypingSession } from "../../src/engine/index";
+import type { LessonAnchor } from "../../src/types";
 import {
   getHiddenInput,
   makeBook,
@@ -1480,6 +1481,180 @@ describe("lifecycle and traversal", () => {
     expect(document.activeElement).toBe(select);
     expect(caret.style.opacity).toBe("0");
     select.parentElement?.removeChild(select);
+    session.destroy();
+  });
+});
+
+describe("finite lesson navigation", () => {
+  const longProse = Array.from({ length: 180 }, () => "word").join(" ");
+
+  test("restart reuses the frozen anchor, discards score, and emits no callbacks", () => {
+    vi.useFakeTimers();
+    const onProgress = vi.fn();
+    const onLessonComplete = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([{ id: "one", blocks: [{ text: longProse }] }]),
+      container,
+      settings: makeSettings({ lessonLength: 100 }),
+      onProgress,
+      onLessonComplete,
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const anchor = session.getLessonAnchor();
+    const text = container.querySelector(".scr-text")?.textContent;
+    const defensive = session.getLessonAnchor();
+    defensive.start.charIndex = defensive.end.charIndex;
+    expect(session.getLessonAnchor()).toEqual(anchor);
+
+    typeText(input, "word");
+    session.applySettings(makeSettings({ lessonLength: 200 }));
+    session.restartLesson();
+    vi.runOnlyPendingTimers();
+
+    expect(session.getPosition()).toEqual(anchor.start);
+    expect(session.getLessonAnchor()).toEqual(anchor);
+    expect(container.querySelector(".scr-text")?.textContent).toBe(text);
+    expect(session.getStats()).toMatchObject({ charsTyped: 0, errors: 0, elapsedMs: 0 });
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(onLessonComplete).not.toHaveBeenCalled();
+    session.destroy();
+  });
+
+  test("restart does not steal focus back from an interactive control", () => {
+    const session = new TypingSession({
+      book: makeBook([{ id: "one", blocks: [{ text: longProse }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const button = document.createElement("button");
+    container.appendChild(button);
+    button.focus();
+
+    session.restartLesson();
+
+    expect(document.activeElement).toBe(button);
+    expect(container.querySelector<HTMLElement>(".scr-caret")?.style.visibility).toBe(
+      "hidden",
+    );
+    button.remove();
+    session.destroy();
+  });
+
+  test("skip discards the current score and installs the next configured anchor", () => {
+    vi.useFakeTimers();
+    const onProgress = vi.fn();
+    const onLessonComplete = vi.fn();
+    const onBookComplete = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([{ id: "one", blocks: [{ text: longProse }] }]),
+      container,
+      settings: makeSettings({ lessonLength: 100 }),
+      onProgress,
+      onLessonComplete,
+      onBookComplete,
+    });
+    session.start();
+    const skipped = session.getLessonAnchor();
+    pressChar(getHiddenInput(container), "w");
+    session.applySettings(makeSettings({ lessonLength: 200 }));
+
+    const transition = session.skipLesson();
+    vi.runOnlyPendingTimers();
+
+    expect(transition).toEqual({
+      skipped,
+      next: session.getLessonAnchor(),
+      bookComplete: false,
+    });
+    expect(session.getPosition()).toEqual(skipped.end);
+    expect(session.getLessonAnchor().start).toEqual(skipped.end);
+    expect(session.getLessonAnchor().targetNonSpaceChars).toBe(200);
+    expect(session.getStats()).toMatchObject({ charsTyped: 0, errors: 0, elapsedMs: 0 });
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(onLessonComplete).not.toHaveBeenCalled();
+    expect(onBookComplete).not.toHaveBeenCalled();
+    session.destroy();
+  });
+
+  test("final skip reaches terminal position without creating a result or completion callback", () => {
+    const onLessonComplete = vi.fn();
+    const onBookComplete = vi.fn();
+    const session = new TypingSession({
+      book: makeBook([{ id: "one", blocks: [{ text: "short" }] }]),
+      container,
+      settings: makeSettings(),
+      onLessonComplete,
+      onBookComplete,
+    });
+    session.start();
+    pressChar(getHiddenInput(container), "s");
+    const anchor = session.getLessonAnchor();
+
+    expect(session.skipLesson()).toEqual({
+      skipped: anchor,
+      next: null,
+      bookComplete: true,
+    });
+    expect(session.getPosition()).toEqual(anchor.end);
+    expect(session.getStats().charsTyped).toBe(0);
+    expect(container.querySelectorAll(".scr-boundary")).toHaveLength(0);
+    expect(onLessonComplete).not.toHaveBeenCalled();
+    expect(onBookComplete).not.toHaveBeenCalled();
+    session.destroy();
+  });
+
+  test("mounts and completes an exact historical endpoint after settings change", () => {
+    const onLessonComplete = vi.fn();
+    const book = makeBook([
+      { id: "one", blocks: [{ text: `alpha beta ${longProse}` }] },
+    ]);
+    const historical: LessonAnchor = {
+      start: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      // Legacy progress could be an arbitrary mid-word cursor rather than a
+      // modern semantic boundary. Exact mounted anchors still remain usable.
+      end: { sectionIndex: 0, blockIndex: 0, charIndex: 3 },
+      targetNonSpaceChars: 100,
+      plannerVersion: 1,
+    };
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings({ lessonLength: 200 }),
+      onLessonComplete,
+    });
+    session.start();
+    session.mountLesson(historical);
+
+    expect(container.querySelector(".scr-text")?.textContent).toBe("alp");
+    typeText(getHiddenInput(container), "alp");
+
+    expect(onLessonComplete).toHaveBeenCalledTimes(1);
+    expect(onLessonComplete.mock.calls[0]?.[2]).toEqual(historical);
+    expect(session.getPosition()).toEqual(historical.end);
+    expect(session.getLessonAnchor().targetNonSpaceChars).toBe(200);
+    session.destroy();
+  });
+
+  test("rejects malformed anchors and cursors outside the frozen range", () => {
+    const book = makeBook([{ id: "one", blocks: [{ text: longProse }] }]);
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+    });
+    const anchor = session.getLessonAnchor();
+
+    expect(() =>
+      session.mountLesson({ ...anchor, start: anchor.end }),
+    ).toThrow(RangeError);
+    expect(() =>
+      session.mountLesson(anchor, {
+        ...anchor.end,
+        charIndex: anchor.end.charIndex + 1,
+      }),
+    ).toThrow(RangeError);
     session.destroy();
   });
 });

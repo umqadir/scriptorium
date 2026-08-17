@@ -1,5 +1,19 @@
-import { TypingSession, calculateAccuracy, calculateWpm } from "../engine";
+import {
+  TypingSession,
+  calculateAccuracy,
+  calculateWpm,
+  isValidLessonAnchor,
+  lessonCorpusSignature,
+  makeLessonAnchor,
+  reconstructRecentLessonAnchors,
+} from "../engine";
 import { getBook, type StoredBook } from "../store/books";
+import {
+  LESSON_HISTORY_LIMIT,
+  clearLessonNavigation,
+  getLessonNavigation,
+  saveLessonNavigation,
+} from "../store/lesson-navigation";
 import {
   accumulateLifetime,
   applyProgressUpdate,
@@ -17,6 +31,9 @@ import {
   MIN_LESSON_LENGTH,
   normalizeLessonLength,
   type BookProgress,
+  type LessonAnchor,
+  type LessonHistoryRecord,
+  type LessonNavigationState,
   type ParsedBook,
   type Position,
   type Section,
@@ -114,6 +131,26 @@ function hasTypeableSection(book: ParsedBook): boolean {
   );
 }
 
+function positionsEqual(a: Position, b: Position): boolean {
+  return (
+    a.sectionIndex === b.sectionIndex &&
+    a.blockIndex === b.blockIndex &&
+    a.charIndex === b.charIndex
+  );
+}
+
+function comparePositions(a: Position, b: Position): number {
+  return a.sectionIndex - b.sectionIndex ||
+    a.blockIndex - b.blockIndex ||
+    a.charIndex - b.charIndex;
+}
+
+/** Active lesson ranges are half-open. A durable cursor at `end` has already
+ * completed this frontier and must seed/mount the next passage on reload. */
+function positionInActiveAnchor(position: Position, anchor: LessonAnchor): boolean {
+  return comparePositions(position, anchor.start) >= 0 && comparePositions(position, anchor.end) < 0;
+}
+
 function statsFromTotals(totals: SessionTotals): SessionStats {
   const correct = Math.max(0, totals.charsTyped - totals.errors);
   return {
@@ -149,8 +186,18 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let routeTotals: SessionTotals = { ...EMPTY_TOTALS };
   let peakWpm = 0;
   let saveChain: Promise<void> = Promise.resolve();
+  let lessonNavigationSaveChain: Promise<void> = Promise.resolve();
+  let lessonNavigation: LessonNavigationState | undefined;
+  /** Null means the durable frontier; a number indexes prior replay history. */
+  let replayHistoryIndex: number | null = null;
+  let frontierCursor: Position | undefined;
+  let navigationBusy = false;
+  let suppressProgressPersistence = false;
+  let suppressBookCompletionOnce = false;
+  let restartHighWater: Position | undefined;
   let chooserResumePosition: Position | undefined;
   let pausedPosition: Position | undefined;
+  let pausedAnchor: LessonAnchor | undefined;
   let audioContext: AudioContext | undefined;
   let overlayReturnFocus: HTMLElement | null = null;
   let overlayInterruptedSession = false;
@@ -179,6 +226,69 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       });
   };
 
+  const queueLessonNavigationSave = (): void => {
+    if (!lessonNavigation) return;
+    const snapshot: LessonNavigationState = {
+      bookId: lessonNavigation.bookId,
+      corpusSignature: lessonNavigation.corpusSignature,
+      history: lessonNavigation.history.map((record) => ({
+        ...record,
+        anchor: {
+          ...record.anchor,
+          start: { ...record.anchor.start },
+          end: { ...record.anchor.end },
+        },
+        ...(record.result ? { result: { ...record.result } } : {}),
+      })),
+      frontier: {
+        ...lessonNavigation.frontier,
+        start: { ...lessonNavigation.frontier.start },
+        end: { ...lessonNavigation.frontier.end },
+      },
+    };
+    lessonNavigationSaveChain = lessonNavigationSaveChain
+      .then(() => saveLessonNavigation(snapshot))
+      .catch((error: unknown) => {
+        console.error("Failed to save passage history", error);
+        if (!cancelled) showToast("Couldn't save passage history.", "error");
+      });
+  };
+
+  const atFrontier = (): boolean => replayHistoryIndex === null;
+
+  const appendHistoryRecord = (record: LessonHistoryRecord): void => {
+    if (!lessonNavigation) return;
+    lessonNavigation = {
+      ...lessonNavigation,
+      history: [...lessonNavigation.history, record].slice(-LESSON_HISTORY_LIMIT),
+    };
+  };
+
+  const resetLessonNavigationEpoch = (position: Position): LessonAnchor | undefined => {
+    if (!runtimeBook) return undefined;
+    const frontier = makeLessonAnchor(
+      runtimeBook,
+      position,
+      getAppState().settings.lessonLength
+    );
+    lessonNavigation = {
+      bookId,
+      corpusSignature: lessonCorpusSignature(runtimeBook),
+      history: [],
+      frontier,
+    };
+    replayHistoryIndex = null;
+    frontierCursor = { ...position };
+    frontierCompletedStats = undefined;
+    lessonNavigationSaveChain = lessonNavigationSaveChain
+      .then(() => clearLessonNavigation(bookId))
+      .catch((error: unknown) => {
+        console.error("Failed to clear stale passage history", error);
+      });
+    queueLessonNavigationSave();
+    return frontier;
+  };
+
   const persistProgress = (
     position: Position,
     charsCompleted: number,
@@ -199,9 +309,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let hintEl: HTMLElement;
   let lessonLengthSelectEl: HTMLSelectElement;
   let checkpointAnnouncementEl: HTMLElement;
+  let previousPassageButtonEl: HTMLButtonElement | undefined;
+  let restartPassageButtonEl: HTMLButtonElement | undefined;
+  let forwardPassageButtonEl: HTMLButtonElement | undefined;
+  let lessonNavEl: HTMLElement | undefined;
   let checkpointPulseTimer: ReturnType<typeof setTimeout> | undefined;
   let latestStats: SessionStats | undefined;
   let latestCompletedStats: SessionStats | undefined;
+  let frontierCompletedStats: SessionStats | undefined;
 
   const updateChrome = (
     position: Position,
@@ -228,6 +343,36 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       // Keybr-style lesson result remains an indicator until replaced.
       statsEl.hidden = shown.charsTyped === 0 || (!showLive && !latestCompletedStats);
     }
+  };
+
+  const updateLessonNavigationControls = (): void => {
+    if (!previousPassageButtonEl || !restartPassageButtonEl || !forwardPassageButtonEl) return;
+    const history = lessonNavigation?.history ?? [];
+    const previousAvailable = replayHistoryIndex === null
+      ? history.length > 0
+      : replayHistoryIndex > 0;
+    previousPassageButtonEl.disabled = navigationBusy || !session || !previousAvailable;
+    restartPassageButtonEl.disabled = navigationBusy || !session;
+
+    let forwardLabel = "Skip passage";
+    let forwardTitle = "Skip passage (Ctrl + Right Arrow)";
+    let forwardDisabled = navigationBusy || !session;
+    if (replayHistoryIndex !== null) {
+      const returnsToFrontier = replayHistoryIndex >= history.length - 1;
+      forwardLabel = returnsToFrontier ? "Return to current passage" : "Next passage";
+      forwardTitle = `${forwardLabel} (Ctrl + Right Arrow)`;
+    } else if (session) {
+      // Keep the terminal passage skippable so the visible control and
+      // Ctrl+Right share one behavior and no synthetic score is required.
+      forwardDisabled = navigationBusy;
+    }
+    forwardPassageButtonEl.disabled = forwardDisabled;
+    forwardPassageButtonEl.setAttribute("aria-label", forwardLabel);
+    forwardPassageButtonEl.title = forwardTitle;
+  };
+
+  const revealLessonNavigation = (): void => {
+    lessonNavEl?.classList.add("reader-lesson-nav-handoff");
   };
 
   const addRunToRouteTotals = (stats: SessionStats): void => {
@@ -263,36 +408,85 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     queueSave(progress);
   };
 
-  const stopCurrentRun = (): { position: Position; stats: SessionStats } | undefined => {
+  const commitReplayRun = (stats: SessionStats): void => {
+    if (!progress || !runtimeBook || !frontierCursor || stats.charsTyped === 0) return;
+    addRunToRouteTotals(stats);
+    progress = applyProgressUpdate(progress, {
+      position: frontierCursor,
+      charsCompleted: charsAtPosition(runtimeBook, frontierCursor),
+      wpm: stats.wpm,
+    });
+    progress = accumulateLifetime(progress, {
+      charsTyped: stats.charsTyped,
+      errors: stats.errors,
+      timeMs: stats.elapsedMs,
+    });
+    queueSave(progress);
+  };
+
+  const discardCurrentSession = (): {
+    position: Position;
+    stats: SessionStats;
+    anchor: LessonAnchor;
+  } | undefined => {
     const current = session;
     if (!current) return undefined;
     sessionGeneration += 1;
     current.pause();
     const position = current.getPosition();
     const stats = current.getStats();
-    if (runtimeBook && progress) {
-      const charsCompleted = charsAtPosition(runtimeBook, position);
-      if (stats.charsTyped > 0) {
-        commitRun(stats, position, charsCompleted);
-        latestStats = stats;
-      } else persistProgress(position, charsCompleted, stats.wpm);
-    }
+    const anchor = current.getLessonAnchor();
+    suppressProgressPersistence = true;
     current.destroy();
+    suppressProgressPersistence = false;
     session = null;
-    return { position, stats };
+    return { position, stats, anchor };
+  };
+
+  const stopCurrentRun = (): {
+    position: Position;
+    stats: SessionStats;
+    anchor: LessonAnchor;
+  } | undefined => {
+    const current = session;
+    if (!current) return undefined;
+    sessionGeneration += 1;
+    current.pause();
+    const position = current.getPosition();
+    const stats = current.getStats();
+    const anchor = current.getLessonAnchor();
+    if (runtimeBook && progress && atFrontier()) {
+      const durablePosition = restartHighWater && comparePositions(position, restartHighWater) < 0
+        ? restartHighWater
+        : position;
+      frontierCursor = { ...durablePosition };
+      const charsCompleted = charsAtPosition(runtimeBook, durablePosition);
+      if (stats.charsTyped > 0) {
+        commitRun(stats, durablePosition, charsCompleted);
+        latestStats = stats;
+      } else persistProgress(durablePosition, charsCompleted, stats.wpm);
+    }
+    suppressProgressPersistence = !atFrontier();
+    current.destroy();
+    suppressProgressPersistence = false;
+    session = null;
+    return { position, stats, anchor };
   };
 
   const finalizeLifetime = (completed: boolean): SessionStats => {
     if (lifetimeFinalized && finalStats) return finalStats;
 
-    const stopped = stopCurrentRun();
+    const wasReplay = !atFrontier();
+    const stopped = wasReplay ? discardCurrentSession() : stopCurrentRun();
     const combined = statsFromTotals(routeTotals);
     peakWpm = Math.max(peakWpm, combined.wpm);
     finalStats = combined;
     lifetimeFinalized = true;
 
     if (progress && runtimeBook) {
-      const position = stopped?.position ?? progress.position;
+      const position = wasReplay
+        ? frontierCursor ?? progress.position
+        : frontierCursor ?? stopped?.position ?? progress.position;
       const charsCompleted = completed
         ? progress.totalChars
         : charsAtPosition(runtimeBook, position);
@@ -384,6 +578,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       )
     );
     hintEl.textContent = "";
+    updateLessonNavigationControls();
   };
 
   const pauseForChooser = (): Position | undefined => {
@@ -391,7 +586,13 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     session.pause();
     const position = session.getPosition();
     const stats = session.getStats();
-    persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
+    if (atFrontier()) {
+      if (!restartHighWater || comparePositions(position, restartHighWater) >= 0) {
+        restartHighWater = undefined;
+        frontierCursor = { ...position };
+        persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
+      }
+    }
     return position;
   };
 
@@ -459,7 +660,158 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     returnFocus?.focus();
   };
 
-  const startSession = (startAt: Position): void => {
+  const showMountedPassage = (
+    position: Position,
+    indicator: SessionStats | undefined
+  ): void => {
+    if (!runtimeBook) return;
+    latestStats = indicator;
+    latestCompletedStats = indicator;
+    if (indicator) {
+      updateChrome(position, charsAtPosition(runtimeBook, position), indicator, true);
+    } else {
+      updateChrome(position, charsAtPosition(runtimeBook, position));
+      statsEl.hidden = true;
+    }
+    revealLessonNavigation();
+    updateLessonNavigationControls();
+  };
+
+  const mountPassage = (historyIndex: number | null): void => {
+    if (!session || !lessonNavigation || !runtimeBook) return;
+    if (historyIndex !== null && atFrontier()) {
+      // mountLesson cancels the outgoing lesson's debounced progress callback.
+      // Snapshot its live cursor synchronously before replacing the DOM. A
+      // restart floor remains the durable high-water until it is retyped.
+      const livePosition = session.getPosition();
+      const durablePosition = restartHighWater && comparePositions(livePosition, restartHighWater) < 0
+        ? restartHighWater
+        : livePosition;
+      frontierCursor = { ...durablePosition };
+      persistProgress(
+        durablePosition,
+        charsAtPosition(runtimeBook, durablePosition),
+        session.getStats().wpm
+      );
+    }
+    navigationBusy = true;
+    restartHighWater = undefined;
+    updateLessonNavigationControls();
+    try {
+      if (historyIndex === null) {
+        replayHistoryIndex = null;
+        latestCompletedStats = frontierCompletedStats;
+        const cursor = frontierCursor && positionInActiveAnchor(frontierCursor, lessonNavigation.frontier)
+          ? frontierCursor
+          : lessonNavigation.frontier.start;
+        session.mountLesson(lessonNavigation.frontier, cursor);
+        showMountedPassage(cursor, frontierCompletedStats);
+      } else {
+        const record = lessonNavigation.history[historyIndex];
+        if (!record) return;
+        replayHistoryIndex = historyIndex;
+        session.mountLesson(record.anchor);
+        showMountedPassage(record.anchor.start, record.result);
+      }
+      session.resume();
+    } finally {
+      navigationBusy = false;
+      updateLessonNavigationControls();
+    }
+  };
+
+  const previousPassage = (): void => {
+    if (!session || !lessonNavigation || navigationBusy) return;
+    const targetIndex = replayHistoryIndex === null
+      ? lessonNavigation.history.length - 1
+      : replayHistoryIndex - 1;
+    if (targetIndex < 0) return;
+    mountPassage(targetIndex);
+  };
+
+  const restartPassage = (): void => {
+    if (!session || navigationBusy) return;
+    navigationBusy = true;
+    if (atFrontier() && runtimeBook) {
+      const livePosition = session.getPosition();
+      let durablePosition = livePosition;
+      for (const candidate of [frontierCursor, restartHighWater]) {
+        if (candidate && comparePositions(candidate, durablePosition) > 0) {
+          durablePosition = candidate;
+        }
+      }
+      restartHighWater = { ...durablePosition };
+      frontierCursor = { ...durablePosition };
+      persistProgress(
+        durablePosition,
+        charsAtPosition(runtimeBook, durablePosition),
+        session.getStats().wpm
+      );
+    }
+    updateLessonNavigationControls();
+    try {
+      session.restartLesson();
+      const anchor = session.getLessonAnchor();
+      const indicator = replayHistoryIndex === null
+        ? frontierCompletedStats
+        : lessonNavigation?.history[replayHistoryIndex]?.result;
+      showMountedPassage(anchor.start, indicator);
+      session.resume();
+    } finally {
+      navigationBusy = false;
+      updateLessonNavigationControls();
+    }
+  };
+
+  const moveReplayForward = (): void => {
+    if (replayHistoryIndex === null || !lessonNavigation) return;
+    if (replayHistoryIndex < lessonNavigation.history.length - 1) {
+      mountPassage(replayHistoryIndex + 1);
+    } else {
+      mountPassage(null);
+    }
+  };
+
+  const forwardPassage = (): void => {
+    if (!session || !lessonNavigation || !runtimeBook || !progress || navigationBusy) return;
+    if (replayHistoryIndex !== null) {
+      moveReplayForward();
+      return;
+    }
+
+    navigationBusy = true;
+    restartHighWater = undefined;
+    updateLessonNavigationControls();
+    try {
+      const skipped = session.skipLesson();
+      frontierCursor = { ...skipped.skipped.end };
+      persistProgress(
+        frontierCursor,
+        charsAtPosition(runtimeBook, frontierCursor),
+        undefined
+      );
+      if (skipped.next) {
+        appendHistoryRecord({ anchor: skipped.skipped, outcome: "skipped" });
+        lessonNavigation = { ...lessonNavigation, frontier: skipped.next };
+        queueLessonNavigationSave();
+        showMountedPassage(skipped.next.start, frontierCompletedStats);
+        session.resume();
+      } else if (skipped.bookComplete) {
+        lessonNavigation = { ...lessonNavigation, frontier: skipped.skipped };
+        queueLessonNavigationSave();
+        session.destroy();
+        session = null;
+        lifetimeFinalized = true;
+        finalStats = statsFromTotals(routeTotals);
+        renderCompletion();
+      }
+    } finally {
+      navigationBusy = false;
+      updateLessonNavigationControls();
+    }
+  };
+
+  const startSession = (startAt: Position, anchor?: LessonAnchor): void => {
     if (!runtimeBook || !progress || cancelled || lifetimeFinalized) return;
     clear(typingHost);
     const generation = ++sessionGeneration;
@@ -470,12 +822,19 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       settings: getAppState().settings,
       startAt,
       onProgress: (position, charsCompleted) => {
-        if (cancelled || generation !== sessionGeneration) return;
+        if (cancelled || generation !== sessionGeneration || suppressProgressPersistence) return;
         const stats = created.getStats();
         const displayStats =
           stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats;
-        peakWpm = Math.max(peakWpm, stats.wpm, displayStats?.wpm ?? 0);
-        persistProgress(position, charsCompleted, displayStats?.wpm);
+        if (atFrontier()) {
+          // Frontier Backspace is real resume state and may legitimately move
+          // backward inside the frozen passage. Only replay is write-suppressed.
+          if (!restartHighWater || comparePositions(position, restartHighWater) >= 0) {
+            restartHighWater = undefined;
+            frontierCursor = { ...position };
+            persistProgress(position, charsCompleted, displayStats?.wpm);
+          }
+        }
         updateChrome(position, charsCompleted, displayStats);
       },
       onStats: (stats) => {
@@ -485,21 +844,66 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         const displayStats =
           stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats;
         if (!displayStats) return;
-        peakWpm = Math.max(peakWpm, displayStats.wpm);
         const position = created.getPosition();
         updateChrome(position, charsAtPosition(runtimeBook!, position), displayStats);
       },
-      onLessonComplete: (stats, position) => {
+      onLessonComplete: (stats, position, completedAnchor) => {
         if (cancelled || generation !== sessionGeneration) return;
         // The engine has already mounted the next finite lesson and reset its
         // clock/counters. Persist this immutable result once, and keep it in
         // the chrome while the new lesson remains idle.
-        commitRun(stats, position, charsAtPosition(runtimeBook!, position));
+        let completedBook = false;
+        if (replayHistoryIndex !== null && lessonNavigation) {
+          const record = lessonNavigation.history[replayHistoryIndex];
+          if (record) {
+            lessonNavigation = {
+              ...lessonNavigation,
+              history: lessonNavigation.history.map((item, index) =>
+                index === replayHistoryIndex
+                  ? { anchor: item.anchor, outcome: "completed", result: stats }
+                  : item
+              ),
+            };
+            queueLessonNavigationSave();
+          }
+          commitReplayRun(stats);
+          suppressBookCompletionOnce =
+            Boolean(completedAnchor) &&
+            charsAtPosition(runtimeBook!, completedAnchor!.end) >= progress!.totalChars;
+          completedBook = suppressBookCompletionOnce;
+        } else {
+          restartHighWater = undefined;
+          frontierCursor = { ...position };
+          commitRun(stats, position, charsAtPosition(runtimeBook!, position));
+          frontierCompletedStats = stats;
+          const nextAnchor = created.getLessonAnchor();
+          if (lessonNavigation && completedAnchor) {
+            const hasNext =
+              isValidLessonAnchor(runtimeBook!, nextAnchor) &&
+              positionsEqual(nextAnchor.start, completedAnchor.end);
+            if (hasNext) {
+              appendHistoryRecord({
+                anchor: completedAnchor,
+                outcome: "completed",
+                result: stats,
+              });
+              lessonNavigation = { ...lessonNavigation, frontier: nextAnchor };
+            } else {
+              // A terminal completion has no next range. Keep the completed
+              // anchor as frontier; duplicating it in history is invalid.
+              lessonNavigation = { ...lessonNavigation, frontier: completedAnchor };
+              completedBook = true;
+            }
+            queueLessonNavigationSave();
+          }
+        }
         latestStats = stats;
         updateChrome(position, charsAtPosition(runtimeBook!, position), stats, true);
         // This dedicated polite region receives one mutation per checkpoint;
         // volatile timer updates intentionally never touch it.
-        checkpointAnnouncementEl.textContent = `Lesson complete: ${Math.round(stats.wpm)} WPM, ${formatPercent(stats.accuracy)} accuracy. Next passage.`;
+        checkpointAnnouncementEl.textContent = completedBook
+          ? `Lesson complete: ${Math.round(stats.wpm)} WPM, ${formatPercent(stats.accuracy)} accuracy. Book complete.`
+          : `Lesson complete: ${Math.round(stats.wpm)} WPM, ${formatPercent(stats.accuracy)} accuracy. Next passage.`;
         statsEl.classList.remove("reader-live-stats-complete");
         // Restart the restrained pulse even when two consecutive results are equal.
         void statsEl.offsetWidth;
@@ -509,6 +913,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
           statsEl.classList.remove("reader-live-stats-complete");
           checkpointPulseTimer = undefined;
         }, 200);
+        revealLessonNavigation();
+        if (replayHistoryIndex !== null) moveReplayForward();
+        updateLessonNavigationControls();
       },
       onSectionComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
@@ -525,15 +932,30 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       },
       onBookComplete: () => {
         if (cancelled || generation !== sessionGeneration) return;
+        if (suppressBookCompletionOnce) {
+          suppressBookCompletionOnce = false;
+          return;
+        }
         const stats = finalizeLifetime(true);
         renderCompletion(stats);
       },
     });
+    if (anchor) created.mountLesson(anchor, startAt);
     session = created;
     const normalized = created.getPosition();
     const absoluteChars = charsAtPosition(runtimeBook, normalized);
     progress = { ...progress, totalChars: computeTotalChars(runtimeBook.sections, {}) };
-    persistProgress(normalized, absoluteChars, undefined);
+    if (atFrontier()) {
+      const durablePosition = restartHighWater && comparePositions(normalized, restartHighWater) < 0
+        ? restartHighWater
+        : normalized;
+      frontierCursor = { ...durablePosition };
+      persistProgress(
+        durablePosition,
+        charsAtPosition(runtimeBook, durablePosition),
+        undefined
+      );
+    }
     const startingStats = created.getStats();
     updateChrome(
       normalized,
@@ -543,6 +965,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         : latestStats
     );
     created.start();
+    updateLessonNavigationControls();
   };
 
   const renderNoSections = (): void => {
@@ -567,6 +990,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   const applySectionChoices = (choices: Map<string, boolean>): void => {
     if (!storedBook || !progress) return;
     const wasFinalized = lifetimeFinalized;
+    const wasReplay = !atFrontier();
     const stopped = stopCurrentRun();
     let updated = progress;
     for (const section of storedBook.sections) {
@@ -595,6 +1019,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     closeChooser(false);
 
     if (!hasTypeableSection(runtimeBook)) {
+      lessonNavigation = undefined;
+      replayHistoryIndex = null;
+      lessonNavigationSaveChain = lessonNavigationSaveChain.then(() =>
+        clearLessonNavigation(bookId)
+      );
       queueSave(progress);
       renderNoSections();
       return;
@@ -614,11 +1043,13 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       latestCompletedStats = undefined;
       peakWpm = 0;
     }
-    const requested =
-      stopped?.position ?? chooserResumePosition ?? progress.position;
+    const requested = wasReplay
+      ? frontierCursor ?? progress.position
+      : stopped?.position ?? chooserResumePosition ?? progress.position;
     chooserResumePosition = undefined;
     pausedPosition = undefined;
-    startSession(requested);
+    const anchor = resetLessonNavigationEpoch(requested);
+    startSession(requested, anchor);
   };
 
   const sectionProgressLabel = (sectionIndex: number, position: Position): string => {
@@ -660,7 +1091,8 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     }
     chooserResumePosition = undefined;
     pausedPosition = undefined;
-    startSession(target);
+    const anchor = resetLessonNavigationEpoch(target);
+    startSession(target, anchor);
   };
 
   function openContents(returnFocus = document.activeElement as HTMLElement | null): void {
@@ -931,8 +1363,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
               on: {
                 click: () => {
                   const resumeAt = pausedPosition ?? progress!.position;
+                  const resumeAnchor = pausedAnchor;
                   pausedPosition = undefined;
-                  startSession(resumeAt);
+                  pausedAnchor = undefined;
+                  startSession(resumeAt, resumeAnchor);
                   hintEl.textContent = ACTIVE_READER_HINT;
                 },
               },
@@ -956,7 +1390,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   const pauseSession = (): void => {
     if (!session) return;
-    pausedPosition = stopCurrentRun()?.position;
+    const stopped = stopCurrentRun();
+    pausedPosition = stopped?.position;
+    pausedAnchor = stopped?.anchor;
     renderSessionResults();
   };
 
@@ -996,8 +1432,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         click: () => {
           if (!session && pausedPosition && !lifetimeFinalized) {
             const resumeAt = pausedPosition;
+            const resumeAnchor = pausedAnchor;
             pausedPosition = undefined;
-            startSession(resumeAt);
+            pausedAnchor = undefined;
+            startSession(resumeAt, resumeAnchor);
           } else {
             session?.resume();
           }
@@ -1006,6 +1444,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         keydown: (event: Event) => {
           const key = event as KeyboardEvent;
           if (key.key.length === 1 || key.key === "Backspace" || key.key === "Enter") {
+            lessonNavEl?.classList.remove("reader-lesson-nav-handoff");
             shell.classList.add("reader-focused");
             playTypingClick();
             const stats = session?.getStats();
@@ -1042,13 +1481,27 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
             }
             const current = session;
             const currentStats = current?.getStats();
+            const currentReplayIndex = replayHistoryIndex;
             const hasActivity = (currentStats?.charsTyped ?? 0) > 0;
             select.disabled = true;
 
             const settingsUpdate = getAppState().updateSettings({ lessonLength });
-            if (hasActivity && current) {
+            if (currentReplayIndex !== null && current) {
+              // Historical ranges are immutable. The new size belongs to the
+              // future frontier/next passage, even when replay is untouched.
+              select.disabled = false;
+              showToast(`${lessonLength} chars from next lesson`);
+              current.resume();
+              void settingsUpdate.catch((error: unknown) => {
+                console.error("Failed to save lesson length", error);
+                if (!cancelled) showToast("Couldn't save the lesson length.", "error");
+              });
+              return;
+            }
+            if ((hasActivity || restartHighWater) && current) {
               // The engine freezes the active lesson target. Preserve this
-              // scored run and apply the new size at its natural handoff.
+              // scored run (or a restarted passage's durable high-water) and
+              // apply the new size at its natural handoff.
               select.disabled = false;
               showToast(`${lessonLength} chars from next lesson`);
               current.resume();
@@ -1075,7 +1528,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
               select.value = String(getAppState().settings.lessonLength);
               if (stopped && !lifetimeFinalized) {
                 pausedPosition = undefined;
-                startSession(stopped.position);
+                let anchor: LessonAnchor | undefined;
+                if (runtimeBook && lessonNavigation) {
+                  anchor = makeLessonAnchor(runtimeBook, stopped.position, lessonLength);
+                  lessonNavigation = { ...lessonNavigation, frontier: anchor };
+                  frontierCursor = { ...stopped.position };
+                  queueLessonNavigationSave();
+                }
+                startSession(stopped.position, anchor);
                 hintEl.textContent = ACTIVE_READER_HINT;
               }
             })();
@@ -1091,6 +1551,44 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       )
     );
     lessonLengthSelectEl.value = String(getAppState().settings.lessonLength);
+    previousPassageButtonEl = el("button", {
+      className: "icon-button",
+      attrs: {
+        type: "button",
+        "aria-label": "Previous passage",
+        title: "Previous passage (Ctrl + Shift + Left Arrow)",
+      },
+      on: { click: previousPassage },
+      html: icons.arrowLeft,
+    }) as HTMLButtonElement;
+    restartPassageButtonEl = el("button", {
+      className: "icon-button",
+      attrs: {
+        type: "button",
+        "aria-label": "Restart passage",
+        title: "Restart passage (Ctrl + Left Arrow)",
+      },
+      on: { click: restartPassage },
+      html: icons.refresh,
+    }) as HTMLButtonElement;
+    forwardPassageButtonEl = el("button", {
+      className: "icon-button",
+      attrs: {
+        type: "button",
+        "aria-label": "Skip passage",
+        title: "Skip passage (Ctrl + Right Arrow)",
+      },
+      on: { click: forwardPassage },
+      html: icons.arrowRight,
+    }) as HTMLButtonElement;
+    lessonNavEl = el(
+      "div",
+      { className: "reader-lesson-nav", attrs: { role: "group", "aria-label": "Passage controls" } },
+      previousPassageButtonEl,
+      restartPassageButtonEl,
+      forwardPassageButtonEl
+    );
+    updateLessonNavigationControls();
     const chrome = el(
       "div",
       {
@@ -1149,10 +1647,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         )
       )
     );
+    const stageBar = el("div", { className: "reader-stage-bar" }, statsEl, lessonNavEl);
     const workspace = el(
       "div",
       { className: "reader-workspace" },
-      statsEl,
+      stageBar,
       typingHost,
       hintEl,
       checkpointAnnouncementEl
@@ -1185,15 +1684,39 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   };
 
   const onDocumentKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape") return;
-    if (chooser) {
-      event.preventDefault();
-      closeChooser();
+    if (event.key === "Escape") {
+      if (chooser) {
+        event.preventDefault();
+        closeChooser();
+        return;
+      }
+      if (session) pauseSession();
       return;
     }
-    if (session) {
-      pauseSession();
-    }
+    if (
+      chooser ||
+      !session ||
+      navigationBusy ||
+      event.altKey ||
+      event.metaKey ||
+      !event.ctrlKey ||
+      event.repeat
+    ) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      !target.classList.contains("scr-hidden-input") &&
+      target.matches("button, select, input, textarea, [contenteditable='true']")
+    ) return;
+
+    let action: (() => void) | undefined;
+    if (event.key === "ArrowLeft" && event.shiftKey) action = previousPassage;
+    else if (event.key === "ArrowLeft" && !event.shiftKey) action = restartPassage;
+    else if (event.key === "ArrowRight" && !event.shiftKey) action = forwardPassage;
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
   };
 
   const playTypingClick = (): void => {
@@ -1220,7 +1743,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
 
   void (async () => {
     try {
-      const [book, saved] = await Promise.all([getBook(bookId), getProgress(bookId)]);
+      const [book, saved, storedNavigation] = await Promise.all([
+        getBook(bookId),
+        getProgress(bookId),
+        getLessonNavigation(bookId).catch((error: unknown) => {
+          console.error("Failed to load passage history", error);
+          return undefined;
+        }),
+      ]);
       if (cancelled) return;
       if (!book) {
         showMissingBook();
@@ -1238,6 +1768,37 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         ...progress,
         totalChars: computeTotalChars(runtimeBook.sections, {}),
       };
+      const corpusSignature = lessonCorpusSignature(runtimeBook);
+      frontierCursor = { ...progress.position };
+      const navigationIsUsable =
+        storedNavigation?.bookId === bookId &&
+        storedNavigation.corpusSignature === corpusSignature &&
+        positionInActiveAnchor(progress.position, storedNavigation.frontier) &&
+        isValidLessonAnchor(runtimeBook, storedNavigation.frontier) &&
+        storedNavigation.history.every(({ anchor }) =>
+          isValidLessonAnchor(runtimeBook!, anchor)
+        );
+      const atBookEnd =
+        progress.totalChars > 0 &&
+        charsAtPosition(runtimeBook, progress.position) >= progress.totalChars;
+      const canSeedNavigation = hasTypeableSection(runtimeBook) && !atBookEnd;
+      if (navigationIsUsable && storedNavigation) {
+        lessonNavigation = storedNavigation;
+      } else if (canSeedNavigation) {
+        const target = getAppState().settings.lessonLength;
+        lessonNavigation = {
+          bookId,
+          corpusSignature,
+          history: reconstructRecentLessonAnchors(
+            runtimeBook,
+            progress.position,
+            target,
+            LESSON_HISTORY_LIMIT
+          ).map((anchor) => ({ anchor, outcome: "recovered" as const })),
+          frontier: makeLessonAnchor(runtimeBook, progress.position, target),
+        };
+        queueLessonNavigationSave();
+      }
       buildReader();
       unsubscribeSettings = getAppState().subscribe((settings) => {
         if (cancelled) return;
@@ -1263,7 +1824,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         renderCompletion();
         return;
       }
-      startSession(progress.position);
+      startSession(progress.position, lessonNavigation?.frontier);
     } catch (error) {
       console.error("Failed to mount reader", error);
       showMissingBook(true);
@@ -1273,6 +1834,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   return {
     unmount: () => {
       if (cancelled) return;
+      // Navigation writes are serialized immutable snapshots. Enqueue the
+      // final state before teardown so a last replay/frontier update cannot
+      // remain only in memory; the chain continues after this sync handle is
+      // released by the router.
+      queueLessonNavigationSave();
       cancelled = true;
       document.removeEventListener("keydown", onDocumentKeydown);
       if (chooser) closeChooser(false);

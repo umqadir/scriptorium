@@ -3,15 +3,28 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 // reader stylesheet because Vitest stubs CSS imports to an empty string.
 // @ts-expect-error Node's runtime module is available to the Vitest process.
 import { readFileSync } from "node:fs";
-import { DEFAULT_SETTINGS, type BookProgress, type ParsedBook } from "../../src/types";
+import {
+  DEFAULT_SETTINGS,
+  type BookProgress,
+  type LessonNavigationState,
+  type ParsedBook,
+} from "../../src/types";
 import { createInitialProgress } from "../../src/store/progress";
 import { initAppState } from "../../src/ui/state";
+import {
+  isValidLessonAnchor,
+  lessonCorpusSignature,
+  makeLessonAnchor,
+} from "../../src/engine";
 
 const storage = vi.hoisted(() => ({
   getBook: vi.fn(),
   getProgress: vi.fn(),
   saveProgress: vi.fn(async () => undefined),
   saveSettings: vi.fn(async () => undefined),
+  getLessonNavigation: vi.fn<() => Promise<LessonNavigationState | undefined>>(),
+  saveLessonNavigation: vi.fn(async (_state: LessonNavigationState) => undefined),
+  clearLessonNavigation: vi.fn(async (_bookId: string) => undefined),
 }));
 
 vi.mock("../../src/store/books", async (importOriginal) => ({
@@ -28,6 +41,13 @@ vi.mock("../../src/store/progress", async (importOriginal) => ({
 vi.mock("../../src/store/settings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/store/settings")>()),
   saveSettings: storage.saveSettings,
+}));
+
+vi.mock("../../src/store/lesson-navigation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/store/lesson-navigation")>()),
+  getLessonNavigation: storage.getLessonNavigation,
+  saveLessonNavigation: storage.saveLessonNavigation,
+  clearLessonNavigation: storage.clearLessonNavigation,
 }));
 
 import { mountReader } from "../../src/ui/reader";
@@ -70,6 +90,12 @@ describe("mountReader", () => {
     storage.saveProgress.mockResolvedValue(undefined);
     storage.saveSettings.mockReset();
     storage.saveSettings.mockResolvedValue(undefined);
+    storage.getLessonNavigation.mockReset();
+    storage.getLessonNavigation.mockResolvedValue(undefined);
+    storage.saveLessonNavigation.mockReset();
+    storage.saveLessonNavigation.mockResolvedValue(undefined);
+    storage.clearLessonNavigation.mockReset();
+    storage.clearLessonNavigation.mockResolvedValue(undefined);
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false });
     location.hash = "#/reader/book-1";
   });
@@ -101,6 +127,108 @@ describe("mountReader", () => {
 
     expect(host.textContent).toContain("choose sections");
     expect(host.querySelector(".scr-hidden-input")).toBeNull();
+    expect(storage.saveLessonNavigation).not.toHaveBeenCalled();
+    handle.unmount?.();
+  });
+
+  test("reseeds instead of mounting a stale frontier whose exclusive end is already persisted", async () => {
+    const text = Array.from({ length: 70 }, (_, index) => `word${index}`).join(" ");
+    const parsed = book(text);
+    const staleFrontier = makeLessonAnchor(
+      parsed,
+      { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      100,
+    );
+    expect(staleFrontier.end.charIndex).toBeLessThan(text.length);
+    const saved = {
+      ...createInitialProgress("book-1", text.length),
+      position: { ...staleFrontier.end },
+      charsCompleted: staleFrontier.end.charIndex,
+    };
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(saved);
+    storage.getLessonNavigation.mockResolvedValue({
+      bookId: "book-1",
+      corpusSignature: lessonCorpusSignature(parsed),
+      history: [],
+      frontier: staleFrontier,
+    });
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+
+    expect(host.querySelector(".scr-char")?.textContent).toBe(
+      text[staleFrontier.end.charIndex],
+    );
+    await vi.waitFor(() => {
+      const reseeded = storage.saveLessonNavigation.mock.calls.at(-1)?.[0];
+      expect(reseeded?.frontier.start).toEqual(staleFrontier.end);
+      expect(reseeded?.frontier.end).not.toEqual(staleFrontier.end);
+    });
+    handle.unmount?.();
+  });
+
+  test("invalidates cross-section anchors when the runtime inclusion corpus changes", async () => {
+    const section = (id: string, text: string, order: number) => ({
+      id,
+      href: `${id}.xhtml`,
+      title: id,
+      order,
+      kind: "body" as const,
+      included: true,
+      blocks: [{ kind: "paragraph" as const, text }],
+      charCount: text.length,
+    });
+    const parsed: ParsedBook = {
+      meta: {
+        id: "book-1",
+        title: "Corpus Book",
+        author: "An Author",
+        language: "en",
+        addedAt: 1,
+      },
+      sections: [
+        section("first", "alpha ".repeat(6), 0),
+        section("middle", "middle-only ".repeat(3), 1),
+        section("last", "omega ".repeat(30), 2),
+      ],
+    };
+    const staleFrontier = makeLessonAnchor(
+      parsed,
+      { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      100,
+    );
+    const progress = createInitialProgress("book-1", 0, { middle: false });
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(progress);
+    storage.getLessonNavigation.mockResolvedValue({
+      bookId: "book-1",
+      corpusSignature: lessonCorpusSignature(parsed),
+      history: [],
+      frontier: staleFrontier,
+    });
+    const currentRuntime = {
+      ...parsed,
+      sections: parsed.sections.map((item) =>
+        item.id === "middle" ? { ...item, included: false } : item,
+      ),
+    };
+    const expectedSignature = lessonCorpusSignature(currentRuntime);
+    // Both endpoints remain canonical after excluding the interior section;
+    // the corpus fingerprint is what invalidates this otherwise-valid range.
+    expect(isValidLessonAnchor(currentRuntime, staleFrontier)).toBe(true);
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+    await vi.waitFor(() => {
+      expect(storage.saveLessonNavigation.mock.calls.at(-1)?.[0].corpusSignature).toBe(
+        expectedSignature,
+      );
+    });
+    expect(host.querySelector(".scr-text")?.textContent).not.toContain("middle-only");
+    expect(expectedSignature).not.toBe(lessonCorpusSignature(parsed));
     handle.unmount?.();
   });
 
@@ -120,11 +248,21 @@ describe("mountReader", () => {
       "reader-workspace",
     ]);
     expect([...workspace.children].map((child) => child.className)).toEqual([
-      "reader-live-stats",
+      "reader-stage-bar",
       "typing-container",
       "reader-hint",
       "visually-hidden reader-checkpoint-announcement",
     ]);
+    expect(
+      [...workspace.querySelector(".reader-stage-bar")!.children].map(
+        (child) => child.className
+      )
+    ).toEqual(["reader-live-stats", "reader-lesson-nav"]);
+    expect(
+      [...workspace.querySelectorAll<HTMLButtonElement>(".reader-lesson-nav button")].map(
+        (button) => button.getAttribute("aria-label")
+      )
+    ).toEqual(["Previous passage", "Restart passage", "Skip passage"]);
     expect(shell.querySelector('[role="progressbar"]')).toBeNull();
     expect(shell.querySelector(".reader-progress-bar")).toBeNull();
 
@@ -200,6 +338,9 @@ describe("mountReader", () => {
     const input = host.querySelector(".scr-hidden-input")!;
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
     await vi.waitFor(() => expect(host.textContent).toContain("book complete"));
+    expect(host.querySelector(".reader-checkpoint-announcement")?.textContent).toContain(
+      "Book complete."
+    );
     handle.unmount?.();
     await vi.waitFor(() =>
       expect(
@@ -218,6 +359,60 @@ describe("mountReader", () => {
     expect(latest.lifetime.charsTyped).toBe(1);
     expect(latest.lifetime.sessions).toBe(1);
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
+    const navigationSnapshots = storage.saveLessonNavigation.mock.calls.map(
+      ([snapshot]) => snapshot
+    );
+    expect(navigationSnapshots.at(-1)?.history).toEqual([]);
+    expect(navigationSnapshots.at(-1)?.frontier).toMatchObject({
+      start: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      end: { sectionIndex: 0, blockIndex: 0, charIndex: 1 },
+    });
+  });
+
+  test("allows terminal Skip by control and shortcut without manufacturing a score", async () => {
+    const parsed = book("abcdef");
+    const initial = createInitialProgress("book-1", 6);
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(initial);
+
+    const mountAndWait = async () => {
+      const host = document.createElement("main");
+      document.body.appendChild(host);
+      const handle = mountReader(host, "book-1");
+      await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+      return { host, handle };
+    };
+
+    const first = await mountAndWait();
+    const skip = first.host.querySelector<HTMLButtonElement>('[aria-label="Skip passage"]')!;
+    expect(skip.disabled).toBe(false);
+    skip.click();
+    await vi.waitFor(() => expect(first.host.textContent).toContain("book complete"));
+    let snapshots = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+    expect(snapshots.at(-1)?.[0].position.charIndex).toBe(6);
+    expect(snapshots.at(-1)?.[0].lifetime.sessions).toBe(0);
+    expect(skip.disabled).toBe(true);
+    first.handle.unmount?.();
+    first.host.remove();
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    storage.saveProgress.mockClear();
+    storage.saveLessonNavigation.mockClear();
+    const second = await mountAndWait();
+    const shortcut = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(shortcut);
+    expect(shortcut.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(second.host.textContent).toContain("book complete"));
+    snapshots = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+    expect(snapshots.at(-1)?.[0].position.charIndex).toBe(6);
+    expect(snapshots.at(-1)?.[0].lifetime.sessions).toBe(0);
+    second.handle.unmount?.();
+    second.host.remove();
   });
 
   test("remounts an untouched lesson length immediately without manufacturing a result", async () => {
@@ -309,7 +504,7 @@ describe("mountReader", () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
     const root = host.querySelector<HTMLElement>(".scr-root")!;
-    const input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    let input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
     const oldFragmentChars = root.querySelectorAll(".scr-char").length;
     const press = (key: string) =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
@@ -486,6 +681,223 @@ describe("mountReader", () => {
     });
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(3);
     host.remove();
+  });
+
+  test("replays exact passage history without regressing the saved frontier and skips without a score", async () => {
+    vi.useFakeTimers();
+    const text = Array.from(
+      { length: 41 },
+      (_, index) => String.fromCharCode("a".charCodeAt(0) + (index % 26)).repeat(10)
+    ).join(" ");
+    const parsed = book(text);
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", text.length));
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+
+    const handle = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    let input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    const press = (key: string) =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+    press(text[0]!);
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (let index = 1; index < 110; index += 1) press(text[index]!);
+    press(text[110]!);
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (let index = 111; index < 220; index += 1) press(text[index]!);
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+    const previous = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Previous passage"]'
+    )!;
+    const forward = () => host.querySelector<HTMLButtonElement>(
+      ".reader-lesson-nav button:last-child"
+    )!;
+    expect(previous.disabled).toBe(false);
+    expect(forward().getAttribute("aria-label")).toBe("Skip passage");
+
+    // Previous snapshots the live frontier synchronously; mountLesson would
+    // otherwise cancel this character's still-pending debounce.
+    press(text[220]!);
+    const toPrevious = new KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(toPrevious);
+    expect(toPrevious.defaultPrevented).toBe(true);
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[110]);
+    expect(document.activeElement).toBe(input);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    let immediateSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(immediateSnapshots.at(-1)?.position.charIndex).toBe(221);
+
+    // A pause rebuilds the session but must remount the exact historical
+    // anchor, including its frozen end, rather than recomposing from settings.
+    const historicalPassage = host.querySelector(".scr-text")?.textContent;
+    const historicalLastCharacter = host.querySelectorAll(".scr-text .scr-char").item(109)
+      .textContent;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const resume = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "resume"
+    );
+    if (!resume) throw new Error("resume button missing");
+    resume.click();
+    input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    expect(host.querySelector(".scr-text")?.textContent).toBe(historicalPassage);
+    expect(host.querySelectorAll(".scr-text .scr-char").item(109).textContent).toBe(
+      historicalLastCharacter
+    );
+    expect(forward().getAttribute("aria-label")).toBe("Return to current passage");
+    expect(document.activeElement).toBe(input);
+
+    // A partial historical attempt is discarded when moving farther back.
+    press(text[110]!);
+    previous.click();
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[0]);
+    expect(forward().getAttribute("aria-label")).toBe("Next passage");
+
+    const next = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(next);
+    expect(next.defaultPrevented).toBe(true);
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[110]);
+    expect(forward().getAttribute("aria-label")).toBe("Return to current passage");
+    forward().click();
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[220]);
+    expect(forward().getAttribute("aria-label")).toBe("Skip passage");
+
+    let progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 221,
+    });
+    expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
+
+    // Skip advances the durable cursor but does not manufacture a result.
+    forward().click();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 330,
+    });
+    expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
+    const navigation = storage.saveLessonNavigation.mock.calls.at(-1)?.[0];
+    expect(navigation?.history.at(-1)?.outcome).toBe("skipped");
+    expect(navigation?.frontier.start.charIndex).toBe(330);
+
+    // Restart replaces only the in-memory attempt and returns typing focus.
+    press(text[330]!);
+    const restartShortcut = new KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(restartShortcut);
+    expect(restartShortcut.defaultPrevented).toBe(true);
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(0);
+    expect(document.activeElement).toBe(input);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+    expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
+
+    // Escape/resume rebuilds the exact anchor but retains the restart
+    // high-water; teardown must not later queue the visible lower cursor.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const resumeAfterRestart = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "resume"
+    );
+    if (!resumeAfterRestart) throw new Error("resume button missing after restart");
+    resumeAfterRestart.click();
+    input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[330]);
+    expect(document.activeElement).toBe(input);
+    progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+
+    const restartedRoot = host.querySelector(".scr-root");
+    const lessonLength = host.querySelector<HTMLSelectElement>(
+      ".reader-lesson-length-select"
+    )!;
+    lessonLength.value = "150";
+    lessonLength.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.querySelector(".scr-root")).toBe(restartedRoot);
+    expect(document.querySelector(".toast:last-child")?.textContent).toBe(
+      "150 chars from next lesson"
+    );
+    progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+
+    const navigationSavesBeforeUnmount = storage.saveLessonNavigation.mock.calls.length;
+    handle.unmount?.();
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    progressSnapshots = (
+      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
+    ).map(([snapshot]) => snapshot);
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+    expect(storage.saveLessonNavigation.mock.calls.length).toBeGreaterThan(
+      navigationSavesBeforeUnmount
+    );
+    expect(storage.saveLessonNavigation.mock.calls.at(-1)?.[0].frontier.start.charIndex).toBe(
+      330
+    );
+    host.remove();
+  });
+
+  test("persists ordinary frontier Backspace at the exact corrected cursor", async () => {
+    vi.useFakeTimers();
+    const parsed = book("abcdef");
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 6));
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    const input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
+    const press = (key: string) =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+    press("a");
+    press("b");
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+    let saved = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+    expect(saved.at(-1)?.[0].position.charIndex).toBe(2);
+    press("Backspace");
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+    saved = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+    expect(saved.at(-1)?.[0].position.charIndex).toBe(1);
+
+    handle.unmount?.();
   });
 
   test("shows useful session results on Escape and can resume in place", async () => {

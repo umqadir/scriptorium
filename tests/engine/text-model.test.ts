@@ -3,7 +3,11 @@ import {
   buildCanonicalNonSpaceIndex,
   canonicalNonSpaceCharsAt,
   findLessonEnd,
+  isValidLessonAnchor,
+  lessonCorpusSignature,
+  makeLessonAnchor,
   normalizePosition,
+  reconstructRecentLessonAnchors,
 } from "../../src/engine/text-model";
 import { makeBook } from "./helpers";
 
@@ -80,6 +84,29 @@ describe("canonical non-space index", () => {
     expect(countAt(0, 1, 0)).toBe(2);
     expect(countAt(3, 0, 1)).toBe(2);
     expect(countAt(3, 0, 2)).toBe(3);
+  });
+});
+
+describe("lesson corpus signature", () => {
+  test("is deterministic and changes with the runtime inclusion mask", () => {
+    const included = makeBook([
+      { id: "first", blocks: [{ text: "alpha" }] },
+      { id: "middle", blocks: [{ text: "beta" }] },
+      { id: "last", blocks: [{ text: "gamma" }] },
+    ]);
+    const excluded = makeBook([
+      { id: "first", blocks: [{ text: "alpha" }] },
+      { id: "middle", included: false, blocks: [{ text: "beta" }] },
+      { id: "last", blocks: [{ text: "gamma" }] },
+    ]);
+
+    expect(lessonCorpusSignature(included)).toMatch(/^[0-9a-f]{16}$/);
+    expect(lessonCorpusSignature(included)).toBe(
+      lessonCorpusSignature(structuredClone(included)),
+    );
+    expect(lessonCorpusSignature(excluded)).not.toBe(
+      lessonCorpusSignature(included),
+    );
   });
 });
 
@@ -173,5 +200,65 @@ describe("findLessonEnd", () => {
     expect(
       findLessonEnd(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100),
     ).toEqual({ sectionIndex: 3, blockIndex: 0, charIndex: 0 });
+  });
+});
+
+describe("persisted lesson anchors", () => {
+  test("validates exact canonical ranges without recomputing historical ends", () => {
+    const book = makeBook([
+      { id: "one", blocks: [{ text: "alpha beta gamma delta" }] },
+    ]);
+    const historical = {
+      start: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      end: { sectionIndex: 0, blockIndex: 0, charIndex: 6 },
+      targetNonSpaceChars: 100,
+      plannerVersion: 1,
+    };
+
+    expect(isValidLessonAnchor(book, historical)).toBe(true);
+    expect(
+      isValidLessonAnchor(book, {
+        ...historical,
+        plannerVersion: 2,
+      }),
+    ).toBe(false);
+    expect(
+      isValidLessonAnchor(book, {
+        ...historical,
+        end: historical.start,
+      }),
+    ).toBe(false);
+  });
+
+  test("reconstructs only recent section-local anchors and closes a legacy gap", () => {
+    const text = Array.from({ length: 170 }, () => "word").join(" ");
+    const book = makeBook([{ id: "one", blocks: [{ text }] }]);
+    const frontier = { sectionIndex: 0, blockIndex: 0, charIndex: 620 };
+    const anchors = reconstructRecentLessonAnchors(book, frontier, 100, 2);
+
+    expect(anchors).toHaveLength(2);
+    expect(anchors.at(-1)?.end).toEqual(frontier);
+    expect(anchors.every((anchor) => anchor.targetNonSpaceChars === 100)).toBe(
+      true,
+    );
+    expect(anchors[0]?.start).not.toEqual(
+      makeLessonAnchor(book, { sectionIndex: 0, blockIndex: 0, charIndex: 0 }, 100)
+        .start,
+    );
+  });
+
+  test("includes the previous typeable section when frontier is at section start", () => {
+    const previousText = Array.from({ length: 130 }, () => "word").join(" ");
+    const book = makeBook([
+      { id: "previous", blocks: [{ text: previousText }] },
+      { id: "empty", blocks: [] },
+      { id: "current", blocks: [{ text: "current passage" }] },
+    ]);
+    const frontier = { sectionIndex: 2, blockIndex: 0, charIndex: 0 };
+    const anchors = reconstructRecentLessonAnchors(book, frontier, 100);
+
+    expect(anchors.length).toBeGreaterThan(0);
+    expect(anchors[0]?.start.sectionIndex).toBe(0);
+    expect(anchors.at(-1)?.end).toEqual(frontier);
   });
 });

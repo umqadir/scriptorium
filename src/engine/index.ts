@@ -9,6 +9,7 @@
 
 import type {
   Block,
+  LessonAnchor,
   ParsedBook,
   Position,
   Settings,
@@ -30,10 +31,9 @@ import {
   normalizePosition,
   findNextBlock,
   findPreviousBlock,
-  buildCanonicalNonSpaceIndex,
-  canonicalNonSpaceCharsAt,
-  findLessonEnd,
-  type CanonicalNonSpaceIndex,
+  comparePositions,
+  isValidLessonAnchor,
+  makeLessonAnchor,
 } from "./text-model";
 import {
   createBlockState,
@@ -73,12 +73,22 @@ export type TypingSessionOptions = {
   onStats?: (stats: SessionStats) => void;
   /** Fires at each rolling lesson checkpoint. The immutable stats contain
    * the boundary key; position is already the mounted next-lesson start. */
-  onLessonComplete?: (stats: SessionStats, position: Position) => void;
+  onLessonComplete?: (
+    stats: SessionStats,
+    position: Position,
+    completedAnchor?: LessonAnchor,
+  ) => void;
   /** @deprecated Use onLessonComplete. Retained as a fallback callback so
    * existing integrations do not silently lose completed-run stats. */
   onBlockComplete?: (stats: SessionStats, position: Position) => void;
   onSectionComplete?: (sectionIndex: number) => void;
   onBookComplete?: () => void;
+};
+
+export type LessonSkipResult = {
+  skipped: LessonAnchor;
+  next: LessonAnchor | null;
+  bookComplete: boolean;
 };
 
 const PROGRESS_DEBOUNCE_MS = 1000;
@@ -91,7 +101,6 @@ export class TypingSession {
   private readonly opts: TypingSessionOptions;
   private readonly book: ParsedBook;
   private readonly container: HTMLElement;
-  private readonly canonicalNonSpaceIndex: CanonicalNonSpaceIndex;
   private settings: Settings;
 
   private position: Position;
@@ -103,7 +112,7 @@ export class TypingSession {
   private lessonEndPosition: Position;
   /** Frozen target for the active lesson; live settings apply next lesson. */
   private lessonTargetNonSpaceChars: number;
-  private lessonStartNonSpaceChars: number;
+  private lessonPlannerVersion: number;
 
   private readonly blockStates = new Map<string, BlockState>();
   private dom: DomRefs | null = null;
@@ -151,7 +160,6 @@ export class TypingSession {
     this.container = opts.container;
     this.settings = opts.settings;
     this.clock = new SessionClock();
-    this.canonicalNonSpaceIndex = buildCanonicalNonSpaceIndex(this.book);
 
     const start = opts.startAt ?? {
       sectionIndex: firstIncludedSectionIndex(this.book),
@@ -159,15 +167,12 @@ export class TypingSession {
       charIndex: 0,
     };
     this.position = normalizePosition(this.book, start);
-    this.lessonStartPosition = this.position;
+    const anchor = makeLessonAnchor(this.book, this.position, this.lessonLength());
+    this.lessonStartPosition = anchor.start;
     this.lessonBackspaceFloorPosition = this.wordFloorAt(this.position);
-    this.lessonTargetNonSpaceChars = this.lessonLength();
-    this.lessonEndPosition = findLessonEnd(
-      this.book,
-      this.lessonStartPosition,
-      this.lessonTargetNonSpaceChars,
-    );
-    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(this.position);
+    this.lessonTargetNonSpaceChars = anchor.targetNonSpaceChars;
+    this.lessonPlannerVersion = anchor.plannerVersion;
+    this.lessonEndPosition = anchor.end;
     this.finished = !hasTypeableContent(this.book);
     this.initializeResumeState(this.position);
   }
@@ -268,6 +273,64 @@ export class TypingSession {
     };
   }
 
+  getLessonAnchor(): LessonAnchor {
+    return this.currentLessonAnchor();
+  }
+
+  /** Retype the exact frozen fragment. This mirrors Keybr reset: score and
+   * partial input are discarded, no result/progress callback fires, and the
+   * fresh clock stays idle until the first key. */
+  restartLesson(): void {
+    if (this.destroyed || this.finished) return;
+    const hadTypingFocus = this.dom?.hiddenInputEl === document.activeElement;
+    this.installLesson(this.currentLessonAnchor(), undefined, hadTypingFocus);
+  }
+
+  /** Mount an exact historical canonical range. The stored endpoint wins over
+   * current planner/settings so changing lesson length cannot mutate replay. */
+  mountLesson(anchor: LessonAnchor, cursor: Position = anchor.start): void {
+    if (this.destroyed) return;
+    if (!isValidLessonAnchor(this.book, anchor)) {
+      throw new RangeError("Invalid lesson anchor for this book.");
+    }
+    const normalizedCursor = normalizePosition(this.book, cursor);
+    if (
+      !this.positionsEqual(normalizedCursor, cursor) ||
+      comparePositions(cursor, anchor.start) < 0 ||
+      comparePositions(cursor, anchor.end) > 0
+    ) {
+      throw new RangeError("Lesson cursor must be inside the lesson anchor.");
+    }
+    const hadTypingFocus = this.dom?.hiddenInputEl === document.activeElement;
+    this.installLesson(anchor, cursor, hadTypingFocus);
+  }
+
+  /** Discard the current score and move to the frozen exclusive end without
+   * manufacturing a lesson result. The caller persists the returned skip as
+   * an intentional monotonic frontier transition. */
+  skipLesson(): LessonSkipResult {
+    const skipped = this.currentLessonAnchor();
+    if (this.destroyed || this.finished) {
+      return { skipped, next: null, bookComplete: this.finished };
+    }
+    const bookComplete = this.isTerminalPosition(skipped.end);
+    if (bookComplete) {
+      this.cancelProgressSave();
+      this.resetLessonScore();
+      this.boundaryErrors.clear();
+      this.blockStates.clear();
+      this.position = { ...skipped.end };
+      this.finished = true;
+      this.clearRenderedLesson();
+      return { skipped, next: null, bookComplete: true };
+    }
+
+    const next = makeLessonAnchor(this.book, skipped.end, this.lessonLength());
+    const hadTypingFocus = this.dom?.hiddenInputEl === document.activeElement;
+    this.installLesson(next, undefined, hadTypingFocus);
+    return { skipped, next: this.currentLessonAnchor(), bookComplete: false };
+  }
+
   jumpTo(position: Position): void {
     if (this.destroyed) return;
     const normalized = normalizePosition(this.book, position);
@@ -276,15 +339,12 @@ export class TypingSession {
     this.boundaryErrors.clear();
     this.position = normalized;
     this.resetLessonScore();
-    this.lessonStartPosition = normalized;
+    const anchor = makeLessonAnchor(this.book, normalized, this.lessonLength());
+    this.lessonStartPosition = anchor.start;
     this.lessonBackspaceFloorPosition = this.wordFloorAt(normalized);
-    this.lessonTargetNonSpaceChars = this.lessonLength();
-    this.lessonEndPosition = findLessonEnd(
-      this.book,
-      normalized,
-      this.lessonTargetNonSpaceChars,
-    );
-    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(normalized);
+    this.lessonTargetNonSpaceChars = anchor.targetNonSpaceChars;
+    this.lessonPlannerVersion = anchor.plannerVersion;
+    this.lessonEndPosition = anchor.end;
     this.finished = !hasTypeableContent(this.book);
     this.initializeResumeState(normalized);
     if (!this.finished && !this.pausedExplicitly) this.clock.resume();
@@ -616,8 +676,11 @@ export class TypingSession {
     if (charIndex >= text.length) {
       this.onBlockTextComplete();
     } else {
+      const reachedLessonBoundary =
+        this.positionsEqual(this.position, this.lessonEndPosition) ||
+        committedNaturalWordBoundary;
       const checkpointed =
-        committedNaturalWordBoundary && this.maybeEmitLessonCheckpoint();
+        reachedLessonBoundary && this.maybeEmitLessonCheckpoint();
       if (!checkpointed) this.updateCaret();
     }
   }
@@ -830,6 +893,10 @@ export class TypingSession {
 
     const next = findNextBlock(this.book, sectionIndex, blockIndex);
     if (next !== null) {
+      if (this.positionsEqual(this.position, this.lessonEndPosition)) {
+        this.maybeEmitLessonCheckpoint();
+        return;
+      }
       // Stay at the exact canonical block-end position. The separately
       // indexed pilcrow now becomes the caret target until Enter commits it.
       this.updateCaret();
@@ -852,18 +919,11 @@ export class TypingSession {
   }
 
   private emitLessonCheckpoint(force: boolean): boolean {
-    const nonSpaceChars =
-      this.nonSpaceCharsAt(this.position) - this.lessonStartNonSpaceChars;
     const atComposedEnd =
       this.position.sectionIndex === this.lessonEndPosition.sectionIndex &&
       this.position.blockIndex === this.lessonEndPosition.blockIndex &&
       this.position.charIndex === this.lessonEndPosition.charIndex;
-    if (
-      !force &&
-      (!atComposedEnd || nonSpaceChars < this.lessonTargetNonSpaceChars)
-    ) {
-      return false;
-    }
+    if (!force && !atComposedEnd) return false;
     // Do not generate empty results after a threshold checkpoint happens to
     // coincide with the final canonical boundary.
     if (this.totalKeystrokes === 0) return false;
@@ -876,24 +936,90 @@ export class TypingSession {
     this.stopActivityTimers();
     const stats = Object.freeze(this.getStats());
     const position = this.getPosition();
+    const completedAnchor = this.currentLessonAnchor();
     this.resetLessonScore();
-    this.lessonStartPosition = position;
-    this.lessonBackspaceFloorPosition = this.wordFloorAt(position);
-    this.lessonTargetNonSpaceChars = this.lessonLength();
-    this.lessonEndPosition = findLessonEnd(
-      this.book,
-      position,
-      this.lessonTargetNonSpaceChars,
-    );
-    this.lessonStartNonSpaceChars = this.nonSpaceCharsAt(position);
+    if (!this.isTerminalPosition(position)) {
+      const nextAnchor = makeLessonAnchor(this.book, position, this.lessonLength());
+      this.lessonStartPosition = nextAnchor.start;
+      this.lessonBackspaceFloorPosition = this.wordFloorAt(position);
+      this.lessonTargetNonSpaceChars = nextAnchor.targetNonSpaceChars;
+      this.lessonPlannerVersion = nextAnchor.plannerVersion;
+      this.lessonEndPosition = nextAnchor.end;
+      if (this.started && this.dom) {
+        this.rebuildRenderWindow();
+        this.dom.viewportEl.scrollTop = 0;
+        this.updateCaret();
+      }
+    } else if (this.started && this.dom) {
+      // There is no next fragment to mount. Keep the terminal anchor available
+      // for durable navigation, but remove the completed lesson DOM just as the
+      // pre-navigation completion path did.
+      this.clearRenderedLesson();
+    }
+    const callback = this.opts.onLessonComplete ?? this.opts.onBlockComplete;
+    callback?.(stats, position, completedAnchor);
+    return true;
+  }
+
+  private currentLessonAnchor(): LessonAnchor {
+    return {
+      start: { ...this.lessonStartPosition },
+      end: { ...this.lessonEndPosition },
+      targetNonSpaceChars: this.lessonTargetNonSpaceChars,
+      plannerVersion: this.lessonPlannerVersion,
+    };
+  }
+
+  private installLesson(
+    anchor: LessonAnchor,
+    cursor: Position = anchor.start,
+    restoreTypingFocus = false,
+  ): void {
+    this.cancelProgressSave();
+    this.resetLessonScore();
+    this.boundaryErrors.clear();
+    this.blockStates.clear();
+    this.position = { ...cursor };
+    this.lessonStartPosition = { ...anchor.start };
+    this.lessonBackspaceFloorPosition = this.wordFloorAt(cursor);
+    this.lessonTargetNonSpaceChars = anchor.targetNonSpaceChars;
+    this.lessonPlannerVersion = anchor.plannerVersion;
+    this.lessonEndPosition = { ...anchor.end };
+    this.finished = !hasTypeableContent(this.book);
+    this.initializeResumeState(cursor);
     if (this.started && this.dom) {
       this.rebuildRenderWindow();
       this.dom.viewportEl.scrollTop = 0;
-      this.updateCaret();
+      if (restoreTypingFocus && !this.pausedExplicitly) this.focusInput();
+      else this.updateCaret();
     }
-    const callback = this.opts.onLessonComplete ?? this.opts.onBlockComplete;
-    callback?.(stats, position);
-    return true;
+  }
+
+  private isTerminalPosition(position: Position): boolean {
+    const block = this.getBlock(position.sectionIndex, position.blockIndex);
+    return Boolean(
+      block &&
+      position.charIndex === block.text.length &&
+      findNextBlock(this.book, position.sectionIndex, position.blockIndex) === null,
+    );
+  }
+
+  private positionsEqual(a: Position, b: Position): boolean {
+    return (
+      a.sectionIndex === b.sectionIndex &&
+      a.blockIndex === b.blockIndex &&
+      a.charIndex === b.charIndex
+    );
+  }
+
+  private clearRenderedLesson(): void {
+    if (!this.dom) return;
+    this.dom.textEl.replaceChildren();
+    this.spanIndex.clear();
+    this.extrasIndex.clear();
+    this.boundaryIndex.clear();
+    this.renderedBlocks.clear();
+    this.hideCaret();
   }
 
   private resetLessonScore(): void {
@@ -903,6 +1029,14 @@ export class TypingSession {
     this.keystrokesThisSecond = 0;
     this.rawWpmSamples = [];
     this.clock.reset();
+  }
+
+  private cancelProgressSave(): void {
+    if (this.progressTimer !== null) {
+      clearTimeout(this.progressTimer);
+      this.progressTimer = null;
+    }
+    this.progressDirty = false;
   }
 
   private advancePastBoundary(
@@ -1068,13 +1202,6 @@ export class TypingSession {
     return result;
   }
 
-  /** Absolute non-space canonical character count before `position`.
-   * Deriving lesson length from Position keeps wrong keys and Backspace from
-   * incrementally corrupting checkpoint accounting. */
-  private nonSpaceCharsAt(position: Position): number {
-    return canonicalNonSpaceCharsAt(this.canonicalNonSpaceIndex, position);
-  }
-
   private lessonLength(): number {
     return normalizeLessonLength(this.settings.lessonLength);
   }
@@ -1227,3 +1354,9 @@ export class TypingSession {
 }
 
 export { calculateWpm, calculateAccuracy, calculateConsistency } from "./stats";
+export {
+  isValidLessonAnchor,
+  lessonCorpusSignature,
+  makeLessonAnchor,
+  reconstructRecentLessonAnchors,
+} from "./text-model";

@@ -135,6 +135,43 @@ export type SessionStats = {
   elapsedMs: number;
 };
 
+/** Version of the deterministic semantic lesson compositor. Persisted local
+ * anchors keep this value so a future planner can replay the exact old range
+ * instead of silently re-planning it with new rules. */
+export const LESSON_PLANNER_VERSION = 1;
+
+/** Exact frozen canonical range for one finite lesson. `end` is exclusive and
+ * may be the next block's zero Position when the lesson ends on Enter. */
+export type LessonAnchor = {
+  start: Position;
+  end: Position;
+  targetNonSpaceChars: number;
+  plannerVersion: number;
+};
+
+export type LessonHistoryOutcome = "completed" | "skipped" | "recovered";
+
+/** Local-only navigation history. A result is present only for a genuinely
+ * typed completed lesson; skips and migration recovery never invent one. */
+export type LessonHistoryRecord = {
+  anchor: LessonAnchor;
+  outcome: LessonHistoryOutcome;
+  result?: SessionStats;
+};
+
+/** Local-only per-book lesson navigation state. This deliberately does not
+ * appear in SyncPayload: it contains no text, but is device navigation state
+ * rather than cross-device reading progress. */
+export type LessonNavigationState = {
+  bookId: string;
+  /** Opaque structural/inclusion digest. Contains no source text and changes
+   * whenever the corpus on which these anchors were planned changes. */
+  corpusSignature: string;
+  /** Prior ranges only, oldest to newest. The active frontier is separate. */
+  history: LessonHistoryRecord[];
+  frontier: LessonAnchor;
+};
+
 export type LifetimeStats = {
   charsTyped: number;
   errors: number;

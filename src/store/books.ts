@@ -41,11 +41,15 @@ export async function listBooks(): Promise<BookMeta[]> {
 
 export async function deleteBook(id: string): Promise<void> {
   const db = await getDb();
-  const tx = db.transaction(["bookMeta", "books", "progress"], "readwrite");
+  const tx = db.transaction(
+    ["bookMeta", "books", "progress", "lessonNavigation"],
+    "readwrite",
+  );
   await Promise.all([
     tx.objectStore("bookMeta").delete(id),
     tx.objectStore("books").delete(id),
     tx.objectStore("progress").delete(id),
+    tx.objectStore("lessonNavigation").delete(id),
     tx.done,
   ]);
 }

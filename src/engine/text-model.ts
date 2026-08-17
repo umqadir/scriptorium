@@ -5,11 +5,59 @@
  * ever index into it, never transform it.
  */
 
-import type { ParsedBook, Position } from "../types";
+import {
+  LESSON_PLANNER_VERSION,
+  normalizeLessonLength,
+  type LessonAnchor,
+  type ParsedBook,
+  type Position,
+} from "../types";
+
+export const MAX_RECENT_LESSON_ANCHORS = 64;
 
 export type CanonicalNonSpaceIndex = ReadonlyArray<
   ReadonlyArray<{ base: number; prefix: Uint32Array } | null>
 >;
+
+/**
+ * Fingerprint the structural corpus seen by the deterministic lesson planner.
+ *
+ * The source book id already identifies the raw EPUB bytes. This additional
+ * local-only signature captures the runtime inclusion mask and the structural
+ * inputs used by navigation, so stored anchors are discarded when section
+ * overrides change even if their endpoints still happen to be reachable.
+ * No book text or section labels are persisted: only this 64-bit digest is.
+ */
+export function lessonCorpusSignature(book: ParsedBook): string {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  const feed = (value: string | number | boolean): void => {
+    const text = String(value);
+    // Length-prefix every field so adjacent structural values cannot become
+    // ambiguous before hashing (for example, [1, 23] versus [12, 3]).
+    const framed = `${text.length}:${text};`;
+    for (let index = 0; index < framed.length; index += 1) {
+      hash ^= BigInt(framed.charCodeAt(index));
+      hash = (hash * prime) & mask;
+    }
+  };
+
+  feed("lesson-corpus-v1");
+  feed(book.meta.id);
+  feed(book.sections.length);
+  for (const section of book.sections) {
+    feed(section.id);
+    feed(section.order);
+    feed(section.included);
+    feed(section.blocks.length);
+    for (const block of section.blocks) {
+      feed(block.kind);
+      feed(block.text.length);
+    }
+  }
+  return hash.toString(16).padStart(16, "0");
+}
 
 /** Build an immutable-position lookup for rolling lesson length. Excluded
  * sections contribute no characters; empty included blocks retain the same
@@ -135,6 +183,141 @@ export function findLessonEnd(
     if (!next) return blockEnd;
     position = { ...next, charIndex: 0 };
   }
+}
+
+/** Lexicographic canonical book order. Positions at a completed block and at
+ * the next block's zero index remain distinct; the latter sorts later even
+ * though both represent the same number of typed text characters. */
+export function comparePositions(a: Position, b: Position): number {
+  if (a.sectionIndex !== b.sectionIndex) return a.sectionIndex - b.sectionIndex;
+  if (a.blockIndex !== b.blockIndex) return a.blockIndex - b.blockIndex;
+  return a.charIndex - b.charIndex;
+}
+
+export function makeLessonAnchor(
+  book: ParsedBook,
+  start: Position,
+  targetNonSpaceChars: number,
+): LessonAnchor {
+  const normalizedStart = normalizePosition(book, start);
+  const target = normalizeLessonLength(targetNonSpaceChars);
+  return {
+    start: normalizedStart,
+    end: findLessonEnd(book, normalizedStart, target),
+    targetNonSpaceChars: target,
+    plannerVersion: LESSON_PLANNER_VERSION,
+  };
+}
+
+/** Validate only canonical reachability and ordering. Do not recompute `end`:
+ * a persisted historical anchor is intentionally replayed exactly even after
+ * the semantic planner changes. */
+export function isValidLessonAnchor(
+  book: ParsedBook,
+  anchor: LessonAnchor,
+): boolean {
+  if (
+    !Number.isInteger(anchor.plannerVersion) ||
+    anchor.plannerVersion <= 0 ||
+    anchor.plannerVersion > LESSON_PLANNER_VERSION ||
+    normalizeLessonLength(anchor.targetNonSpaceChars) !==
+      anchor.targetNonSpaceChars
+  ) {
+    return false;
+  }
+  const start = normalizePosition(book, anchor.start);
+  const end = normalizePosition(book, anchor.end);
+  return (
+    positionsEqual(start, anchor.start) &&
+    positionsEqual(end, anchor.end) &&
+    comparePositions(start, end) < 0
+  );
+}
+
+/** Rebuild a bounded recent history for pre-v2 local databases without
+ * scanning from the start of a potentially huge book. Planning begins at the
+ * current section; at an exact section start it includes the previous typeable
+ * section so Previous is immediately useful. If a legacy cursor is not a
+ * planner boundary, the final recovered anchor ends exactly at that cursor. */
+export function reconstructRecentLessonAnchors(
+  book: ParsedBook,
+  currentFrontierStart: Position,
+  targetNonSpaceChars: number,
+  limit = MAX_RECENT_LESSON_ANCHORS,
+): LessonAnchor[] {
+  if (!hasTypeableContent(book)) return [];
+  const frontier = normalizePosition(book, currentFrontierStart);
+  const target = normalizeLessonLength(targetNonSpaceChars);
+  const boundedLimit = Math.min(
+    MAX_RECENT_LESSON_ANCHORS,
+    Math.max(0, Number.isFinite(limit) ? Math.floor(limit) : 0),
+  );
+  if (boundedLimit === 0) return [];
+
+  let sectionIndex = frontier.sectionIndex;
+  const sectionStart = firstPositionInSection(book, sectionIndex);
+  if (sectionStart && positionsEqual(frontier, sectionStart)) {
+    const previous = previousTypeableSectionIndex(book, sectionIndex);
+    if (previous !== null) sectionIndex = previous;
+  }
+  const scopeStart = firstPositionInSection(book, sectionIndex);
+  if (!scopeStart || comparePositions(scopeStart, frontier) >= 0) return [];
+
+  const anchors: LessonAnchor[] = [];
+  let cursor = scopeStart;
+  while (comparePositions(cursor, frontier) < 0) {
+    const planned = makeLessonAnchor(book, cursor, target);
+    if (comparePositions(planned.end, cursor) <= 0) break;
+    if (comparePositions(planned.end, frontier) > 0) break;
+    anchors.push(planned);
+    cursor = planned.end;
+  }
+
+  if (comparePositions(cursor, frontier) < 0) {
+    anchors.push({
+      start: cursor,
+      end: frontier,
+      targetNonSpaceChars: target,
+      plannerVersion: LESSON_PLANNER_VERSION,
+    });
+  }
+  return anchors.slice(-boundedLimit).map(cloneLessonAnchor);
+}
+
+function cloneLessonAnchor(anchor: LessonAnchor): LessonAnchor {
+  return {
+    start: { ...anchor.start },
+    end: { ...anchor.end },
+    targetNonSpaceChars: anchor.targetNonSpaceChars,
+    plannerVersion: anchor.plannerVersion,
+  };
+}
+
+function positionsEqual(a: Position, b: Position): boolean {
+  return (
+    a.sectionIndex === b.sectionIndex &&
+    a.blockIndex === b.blockIndex &&
+    a.charIndex === b.charIndex
+  );
+}
+
+function firstPositionInSection(
+  book: ParsedBook,
+  sectionIndex: number,
+): Position | null {
+  if (!book.sections[sectionIndex]?.included) return null;
+  const blockIndex = firstNonEmptyBlockIndex(book, sectionIndex);
+  return blockIndex === null ? null : { sectionIndex, blockIndex, charIndex: 0 };
+}
+
+function previousTypeableSectionIndex(
+  book: ParsedBook,
+  from: number,
+): number | null {
+  for (let sectionIndex = from - 1; sectionIndex >= 0; sectionIndex--) {
+    if (sectionIsTypeable(book, sectionIndex)) return sectionIndex;
+  }
+  return null;
 }
 
 function headingCarryEnd(
