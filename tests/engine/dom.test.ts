@@ -140,13 +140,80 @@ describe("renderWindow", () => {
     expect(host.querySelector(".scr-word--block-end")?.textContent).toBe("line¶");
     expect(host.querySelectorAll(".scr-line-break")).toHaveLength(1);
     const blocks = host.querySelectorAll<HTMLElement>(".scr-block");
-    expect([...blocks[0]!.children].filter((el) => el.classList.contains("scr-word"))).toHaveLength(2);
-    expect([...blocks[1]!.children].filter((el) => el.classList.contains("scr-word"))).toHaveLength(2);
+    expect(blocks[0]!.querySelector(".scr-line-tail")?.children).toHaveLength(2);
+    expect(blocks[1]!.querySelector(".scr-line-tail")?.children).toHaveLength(2);
     expect(
       [...host.querySelectorAll<HTMLElement>(".scr-char")]
         .map((span) => span.textContent)
         .join(""),
     ).toBe("first linesecond line");
+  });
+
+  test("pilcrow does not add intrinsic width to the exact reported final prose word", () => {
+    const host = document.createElement("div");
+    const text =
+      "The girl I will not give back; sooner will old age come upon her";
+    const refs = renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 0,
+          blockIndex: 0,
+          block: { kind: "paragraph", text },
+          hasBoundary: true,
+        },
+      ],
+      () => "pending",
+      () => [],
+    );
+
+    const finalWord = host.querySelector<HTMLElement>(".scr-word--block-end")!;
+    const marker = refs.boundaryIndex.get("0:0")!;
+    const lineTail = host.querySelector<HTMLElement>(".scr-line-tail")!;
+    expect(finalWord.textContent).toBe("her¶");
+    expect(marker.parentElement).toBe(finalWord);
+    expect(
+      [...lineTail.children].map((word) => word.textContent),
+    ).toEqual(["upon ", "her¶"]);
+    expect(host.querySelectorAll(".scr-line-break")).toHaveLength(1);
+    expect(
+      [...host.querySelectorAll<HTMLElement>(".scr-char")]
+        .map((span) => span.textContent)
+        .join(""),
+    ).toBe(text);
+
+    // happy-dom has no layout engine, so lock the geometry contract directly:
+    // the wrapper establishes the positioning box and the pilcrow is removed
+    // from inline sizing at the wrapper's trailing edge.
+    expect(typingCss).toMatch(
+      /\.scr-word--block-end\s*\{[^}]*position:\s*relative;/s,
+    );
+    expect(typingCss).toMatch(
+      /\.scr-boundary\s*\{[^}]*position:\s*absolute;[^}]*inset-inline-start:\s*100%;[^}]*top:\s*0;/s,
+    );
+    expect(typingCss).toMatch(
+      /\.scr-line-tail\s*\{[^}]*display:\s*inline-flex;[^}]*flex:\s*none;[^}]*flex-wrap:\s*wrap;[^}]*max-width:\s*100%;/s,
+    );
+  });
+
+  test("does not manufacture a widow group for a one-word source block", () => {
+    const host = document.createElement("div");
+    renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 0,
+          blockIndex: 0,
+          block: { kind: "verse", text: "Sing" },
+          hasBoundary: true,
+        },
+      ],
+      () => "pending",
+      () => [],
+    );
+
+    expect(host.querySelector(".scr-line-tail")).toBeNull();
+    expect(host.querySelector(".scr-word")?.textContent).toBe("Sing¶");
   });
 
   test("renders a partial lesson block with canonical indices, extras keys, and pilcrow", () => {

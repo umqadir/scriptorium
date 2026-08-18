@@ -51,6 +51,24 @@
   flex: none;
 }
 
+/* A pilcrow belongs visually to the final word but must not participate in
+ * that word's intrinsic width. Otherwise a line with room for `her` but not
+ * `her¶` moves the whole word to an orphan row. The positioned marker remains
+ * inside this wrapper, so it can never wrap independently. */
+.scr-word--block-end {
+  position: relative;
+}
+
+/* Keep the last two words together when the tail fits on a physical row.
+ * `max-width` plus internal wrapping avoids horizontal overflow when those
+ * two words are collectively wider than the entire viewport. */
+.scr-line-tail {
+  display: inline-flex;
+  flex: none;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
 .scr-char {
   display: inline-block;
   white-space: pre;
@@ -86,6 +104,9 @@
 /* A source-block boundary is an explicit Enter target. It lives inside the
  * final word wrapper so the pilcrow can never wrap onto a line by itself. */
 .scr-boundary {
+  position: absolute;
+  inset-inline-start: 100%;
+  top: 0;
   display: inline-block;
   margin-inline-start: 0;
   color: var(--sub-color, #646669);

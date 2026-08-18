@@ -215,6 +215,7 @@ export function renderWindow(
       const isLastRenderedChar = i === renderEnd - 1;
       const isBlockLastChar = i === text.length - 1;
       if (isDelimiter) {
+        if (isBlockLastChar) wordEl.classList.add("scr-word--block-end");
         finishWord(span, isBlockLastChar && hasBoundary);
         wordStart = i + 1;
         wordEl = document.createElement("span");
@@ -233,6 +234,25 @@ export function renderWindow(
     if (renderStart === renderEnd && renderEnd === text.length && hasBoundary) {
       wordEl.classList.add("scr-word--block-end");
       finishWord(undefined, true);
+    }
+
+    // Deterministic, source-line-local widow prevention. Keeping the final
+    // two word wrappers in one outer flex item prevents a genuinely wrapped
+    // final word from becoming a singleton row. The tail never spans blocks,
+    // so explicit prose/verse boundaries and canonical keys remain intact.
+    // CSS permits an internal wrap only when the pair itself is wider than
+    // the entire available viewport.
+    const renderedWords = Array.from(blockEl.children).filter(
+      (child): child is HTMLSpanElement => child.classList.contains("scr-word"),
+    );
+    if (renderedWords.length >= 2) {
+      const penultimateWord = renderedWords.at(-2)!;
+      const finalWord = renderedWords.at(-1)!;
+      const lineTailEl = document.createElement("span");
+      lineTailEl.className = "scr-line-tail";
+      blockEl.insertBefore(lineTailEl, penultimateWord);
+      lineTailEl.appendChild(penultimateWord);
+      lineTailEl.appendChild(finalWord);
     }
 
     if (hasBoundary) {
