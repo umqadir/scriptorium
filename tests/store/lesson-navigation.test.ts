@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import type {
+  BookProgress,
   LessonAnchor,
   LessonHistoryRecord,
   LessonNavigationState,
@@ -44,6 +45,7 @@ import {
   getLessonNavigation,
   LESSON_HISTORY_LIMIT,
   sanitizeLessonNavigationState,
+  saveReaderCheckpoint,
   saveLessonNavigation,
 } from "../../src/store/lesson-navigation";
 
@@ -83,6 +85,20 @@ function state(overrides: Partial<LessonNavigationState> = {}): LessonNavigation
   };
 }
 
+function progress(overrides: Partial<BookProgress> = {}): BookProgress {
+  return {
+    bookId: "book-a",
+    position: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+    charsCompleted: 0,
+    totalChars: 1_000,
+    updatedAt: 1_000,
+    lifetime: { charsTyped: 0, errors: 0, timeMs: 0, sessions: 0 },
+    bestWpm: 0,
+    sectionOverrides: {},
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mocks.stored.value = undefined;
   mocks.get.mockClear();
@@ -94,6 +110,13 @@ beforeEach(() => {
 });
 
 describe("lesson navigation persistence", () => {
+  test("rejects checkpoint book-id mismatches before opening a transaction", async () => {
+    await expect(
+      saveReaderCheckpoint(progress(), state({ bookId: "book-b" })),
+    ).rejects.toThrow("book ids must match");
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
   test("loads a valid record as a defensive allowlisted deep clone", async () => {
     const raw = state() as LessonNavigationState & Record<string, unknown>;
     raw["bookText"] = "copyrighted source text must never be retained";

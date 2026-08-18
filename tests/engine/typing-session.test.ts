@@ -69,6 +69,20 @@ function dispatchInput(
   );
 }
 
+function pressModifiedBackspace(
+  input: HTMLInputElement,
+  modifiers: Pick<KeyboardEventInit, "altKey" | "ctrlKey" | "metaKey">,
+): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    key: "Backspace",
+    bubbles: true,
+    cancelable: true,
+    ...modifiers,
+  });
+  input.dispatchEvent(event);
+  return event;
+}
+
 describe("basic character states", () => {
   test("correct input produces 100% accuracy and advances position", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "hello world" }] }]);
@@ -198,7 +212,7 @@ describe("software keyboard input", () => {
     dispatchBeforeInput(input, "insertText", "bc");
     expect(session.getPosition().charIndex).toBe(3);
     expect(session.getStats().accuracy).toBe(100);
-    expect(input.value).toBe("");
+    expect(input.value).toBe("?");
     session.destroy();
   });
 
@@ -208,9 +222,10 @@ describe("software keyboard input", () => {
     session.start();
     const input = getHiddenInput(container);
 
-    dispatchInput(input, "insertText", "ab");
+    // A real browser appends after the non-empty Safari deletion sentinel.
+    dispatchInput(input, "insertText", "?ab");
     expect(session.getPosition().charIndex).toBe(2);
-    expect(input.value).toBe("");
+    expect(input.value).toBe("?");
 
     dispatchInput(input, "deleteContentBackward", "");
     expect(session.getPosition().charIndex).toBe(1);
@@ -218,7 +233,7 @@ describe("software keyboard input", () => {
     dispatchInput(input, "insertText", "bc");
     expect(session.getPosition().charIndex).toBe(3);
     expect(session.getStats().accuracy).toBe(100);
-    expect(input.value).toBe("");
+    expect(input.value).toBe("?");
     session.destroy();
   });
 
@@ -267,6 +282,61 @@ describe("software keyboard input", () => {
     dispatchInput(input, "insertText", "b");
     expect(session.getPosition().charIndex).toBe(1);
     expect(session.getStats().charsTyped).toBe(1);
+  });
+
+  test("native backward-delete intents edit words/lines once and forward intents are safe no-ops", async () => {
+    const book = makeBook([{ id: "ch1", blocks: [{ text: "one two three" }] }]);
+    const session = new TypingSession({ book, container, settings: makeSettings() });
+    session.start();
+    const input = getHiddenInput(container);
+
+    dispatchBeforeInput(input, "insertText", "one two");
+    expect(session.getPosition().charIndex).toBe(7);
+
+    const wordDelete = dispatchBeforeInput(input, "deleteWordBackward");
+    expect(wordDelete.defaultPrevented).toBe(true);
+    expect(session.getPosition().charIndex).toBe(4);
+    // A browser may still emit input after a canceled beforeinput.
+    dispatchInput(input, "deleteWordBackward", "");
+    expect(session.getPosition().charIndex).toBe(4);
+
+    await Promise.resolve();
+    const lineDelete = dispatchBeforeInput(input, "deleteSoftLineBackward");
+    expect(lineDelete.defaultPrevented).toBe(true);
+    expect(session.getPosition().charIndex).toBe(4);
+
+    await Promise.resolve();
+    dispatchInput(input, "deleteHardLineBackward", "");
+    expect(session.getPosition().charIndex).toBe(4);
+
+    await Promise.resolve();
+    dispatchBeforeInput(input, "insertText", "two");
+    await Promise.resolve();
+    const forwardDelete = dispatchBeforeInput(input, "deleteWordForward");
+    expect(forwardDelete.defaultPrevented).toBe(true);
+    dispatchInput(input, "deleteContentForward", "");
+    expect(session.getPosition().charIndex).toBe(7);
+    expect(session.getStats().charsTyped).toBe(10);
+    session.destroy();
+  });
+
+  test("modifier keydown followed by native delete events performs one word edit", () => {
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "one two three" }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    typeText(input, "one two");
+
+    pressModifiedBackspace(input, { altKey: true });
+    expect(session.getPosition().charIndex).toBe(4);
+    const beforeInput = dispatchBeforeInput(input, "deleteWordBackward");
+    expect(beforeInput.defaultPrevented).toBe(true);
+    dispatchInput(input, "deleteWordBackward", "");
+    expect(session.getPosition().charIndex).toBe(4);
+    session.destroy();
   });
 });
 
@@ -689,43 +759,70 @@ describe("explicit block boundaries", () => {
     session.destroy();
   });
 
-  test("requires one Backspace per wrong boundary key and blocks Enter until clear", () => {
+  test.each(["off", "letter", "word"] as const)(
+    "'%s' mode never deadlocks Enter behind invisible boundary errors",
+    (stopOnError) => {
+      const book = makeBook([
+        { id: "ch1", blocks: [{ text: "Apollo" }, { text: "returns" }] },
+      ]);
+      const session = new TypingSession({
+        book,
+        container,
+        settings: makeSettings({ stopOnError }),
+      });
+      session.start();
+      const input = getHiddenInput(container);
+
+      typeText(input, "Apollo");
+      pressChar(input, " ");
+      pressChar(input, "x");
+      const marker = container.querySelector<HTMLSpanElement>(".scr-boundary")!;
+      expect(marker.classList).toContain("scr-boundary--incorrect");
+      expect(session.getStats().errors).toBe(2);
+
+      // A correct Enter fixes its own dedicated target in every error mode.
+      // The permanent errors remain in stats, while the non-canonical marker
+      // state is cleared. Word-stop only gates on the canonical final word.
+      pressEnter(input);
+      expect(session.getPosition()).toEqual({
+        sectionIndex: 0,
+        blockIndex: 1,
+        charIndex: 0,
+      });
+      expect(marker.classList).toContain("scr-boundary--correct");
+      expect(session.getStats()).toMatchObject({ charsTyped: 9, errors: 2 });
+      session.destroy();
+    },
+  );
+
+  test("word mode offers one optional Backspace for repeated pilcrow errors across pause", () => {
     const book = makeBook([
-      { id: "ch1", blocks: [{ text: "a" }, { text: "b" }] },
+      { id: "ch1", blocks: [{ text: "Apollo" }, { text: "returns" }] },
     ]);
-    const onLessonComplete = vi.fn();
     const session = new TypingSession({
       book,
       container,
-      settings: makeSettings(),
-      onLessonComplete,
+      settings: makeSettings({ stopOnError: "word" }),
     });
     session.start();
     const input = getHiddenInput(container);
 
-    pressChar(input, "a");
+    typeText(input, "Apollo");
+    pressChar(input, " ");
     pressChar(input, "x");
-    pressChar(input, "y");
     const marker = container.querySelector<HTMLSpanElement>(".scr-boundary")!;
     expect(marker.classList).toContain("scr-boundary--incorrect");
 
-    pressEnter(input);
-    expect(session.getPosition()).toEqual({
-      sectionIndex: 0,
-      blockIndex: 0,
-      charIndex: 1,
-    });
+    session.pause();
+    session.resume();
 
-    pressBackspace(input);
-    expect(marker.classList).toContain("scr-boundary--incorrect");
-    expect(session.getPosition().charIndex).toBe(1);
-    pressEnter(input);
-    expect(session.getPosition().blockIndex).toBe(0);
-
+    // The pilcrow renders one red correction target, so one Backspace clears
+    // it without deleting the final canonical character, even after multiple
+    // wrong printable keys and a pause/resume cycle.
     pressBackspace(input);
     expect(marker.classList).toContain("scr-boundary--pending");
-    expect(session.getPosition().charIndex).toBe(1);
-    expect(charSpan(container, 0, 0).classList).toContain("scr-char--correct");
+    expect(session.getPosition().charIndex).toBe(6);
+    expect(charSpan(container, 0, 5).classList).toContain("scr-char--correct");
 
     pressEnter(input);
     expect(session.getPosition()).toEqual({
@@ -733,13 +830,96 @@ describe("explicit block boundaries", () => {
       blockIndex: 1,
       charIndex: 0,
     });
-    // A short source block is not a lesson by itself; its errors continue
-    // into the next block until the rolling lesson or final remainder ends.
-    expect(onLessonComplete).not.toHaveBeenCalled();
-    expect(session.getStats().errors).toBe(4);
-    pressChar(input, "b");
-    expect(onLessonComplete).toHaveBeenCalledTimes(1);
-    expect(onLessonComplete.mock.calls[0]?.[0].errors).toBe(4);
+    expect(session.getStats().errors).toBe(2);
+    session.destroy();
+  });
+
+  test("word mode blocks only on a wrong canonical final word, not the red pilcrow", () => {
+    const book = makeBook([
+      { id: "ch1", blocks: [{ text: "Apollo" }, { text: "returns" }] },
+    ]);
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings({ stopOnError: "word" }),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    typeText(input, "Apollx");
+    pressChar(input, " ");
+    pressEnter(input);
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 6,
+    });
+    const marker = container.querySelector<HTMLSpanElement>(".scr-boundary")!;
+    expect(marker.classList).toContain("scr-boundary--incorrect");
+    expect(marker.getAttribute("aria-label")).toBe(
+      "Correct the final word, then press Enter",
+    );
+
+    // Clearing the boundary marker never deletes canonical text. Correcting
+    // the final word is the only semantic prerequisite for the next Enter.
+    pressBackspace(input);
+    expect(session.getPosition().charIndex).toBe(6);
+    expect(marker.classList).toContain("scr-boundary--incorrect");
+    expect(marker.getAttribute("aria-label")).toBe(
+      "Correct the final word, then press Enter",
+    );
+    pressBackspace(input);
+    expect(session.getPosition().charIndex).toBe(5);
+    pressChar(input, "o");
+    pressEnter(input);
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 1,
+      charIndex: 0,
+    });
+    session.destroy();
+  });
+
+  test("restart and exact passage remount discard transient pilcrow errors", () => {
+    const book = makeBook([
+      { id: "ch1", blocks: [{ text: "Apollo" }, { text: "returns" }] },
+    ]);
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings({ stopOnError: "word" }),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const anchor = session.getLessonAnchor();
+
+    typeText(input, "Apollo");
+    pressChar(input, " ");
+    expect(container.querySelector(".scr-boundary--incorrect")).not.toBeNull();
+
+    session.restartLesson();
+    expect(session.getPosition()).toEqual(anchor.start);
+    expect(container.querySelector(".scr-boundary--incorrect")).toBeNull();
+
+    typeText(input, "Apollo");
+    pressChar(input, "x");
+    expect(container.querySelector(".scr-boundary--incorrect")).not.toBeNull();
+
+    // Passage navigation may remount the same frozen lesson at its exact
+    // canonical cursor. Boundary mistakes are transient and must not leak
+    // into that fresh attempt.
+    session.mountLesson(anchor, {
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 6,
+    });
+    expect(container.querySelector(".scr-boundary--incorrect")).toBeNull();
+    pressEnter(input);
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 1,
+      charIndex: 0,
+    });
     session.destroy();
   });
 
@@ -1012,7 +1192,7 @@ describe("extra characters", () => {
     session.destroy();
   });
 
-  test("a removed extra remains permanent error history for cross-word backspace", () => {
+  test("a removed extra remains permanent error history after ordinary traversal", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "cat dog" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings() });
     session.start();
@@ -1024,7 +1204,7 @@ describe("extra characters", () => {
     pressChar(input, " ");
     pressChar(input, "d");
     pressBackspace(input); // back to start of dog
-    pressBackspace(input); // allowed into cat because it once had an extra
+    pressBackspace(input); // ordinary Backspace traverses the word boundary
     expect(session.getPosition().charIndex).toBe(2);
 
     session.destroy();
@@ -1032,7 +1212,7 @@ describe("extra characters", () => {
 });
 
 describe("backspace across word/block boundaries", () => {
-  test("cannot backspace into a committed word that had no error", () => {
+  test("ordinary Backspace traverses a correct committed word", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "cat dog" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings() });
     session.start();
@@ -1045,13 +1225,13 @@ describe("backspace across word/block boundaries", () => {
 
     pressBackspace(input); // undo 'd' -> charIndex 4
     expect(session.getPosition().charIndex).toBe(4);
-    pressBackspace(input); // at word start of "dog", "cat" had no error -> gated no-op
-    expect(session.getPosition().charIndex).toBe(4);
+    pressBackspace(input); // crosses the delimiter and removes the prior word's final char
+    expect(session.getPosition().charIndex).toBe(2);
 
     session.destroy();
   });
 
-  test("can backspace into a committed word that had an error, across a block boundary", () => {
+  test("ordinary Backspace traverses a correct source-block boundary", () => {
     const book = makeBook([
       { id: "ch1", blocks: [{ text: "cat" }, { text: "dog" }] },
     ]);
@@ -1059,7 +1239,7 @@ describe("backspace across word/block boundaries", () => {
     session.start();
     const input = getHiddenInput(container);
 
-    pressChar(input, "x"); // wrong 'c' -> incorrect
+    pressChar(input, "c");
     pressChar(input, "a");
     pressChar(input, "t");
     // The block remains at its explicit boundary until Enter commits it.
@@ -1067,9 +1247,130 @@ describe("backspace across word/block boundaries", () => {
     pressEnter(input);
     expect(session.getPosition()).toEqual({ sectionIndex: 0, blockIndex: 1, charIndex: 0 });
 
-    pressBackspace(input); // crosses back into block 0 since it had an error
+    pressBackspace(input); // explicit Enter boundary is editable inside the lesson
     expect(session.getPosition()).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 2 });
 
+    session.destroy();
+  });
+
+  test.each([
+    ["Option", { altKey: true }],
+    ["Control", { ctrlKey: true }],
+  ] as const)("%s+Backspace deletes to prior word starts", (_label, modifiers) => {
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "one two three" }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    typeText(input, "one two");
+    const charsTyped = session.getStats().charsTyped;
+
+    const first = pressModifiedBackspace(input, modifiers);
+    expect(first.defaultPrevented).toBe(true);
+    expect(session.getPosition().charIndex).toBe(4);
+
+    const second = pressModifiedBackspace(input, modifiers);
+    expect(second.defaultPrevented).toBe(true);
+    expect(session.getPosition().charIndex).toBe(0);
+    expect(session.getStats().charsTyped).toBe(charsTyped);
+    session.destroy();
+  });
+
+  test("word deletion crosses a pilcrow while line-backward remains a safe no-op", () => {
+    const session = new TypingSession({
+      book: makeBook([
+        { id: "ch1", blocks: [{ text: "one two" }, { text: "three four" }] },
+      ]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    typeText(input, "one two");
+    pressEnter(input);
+
+    pressModifiedBackspace(input, { ctrlKey: true });
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 4,
+    });
+
+    typeText(input, "two");
+    pressEnter(input);
+    typeText(input, "three");
+    pressModifiedBackspace(input, { metaKey: true });
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 1,
+      charIndex: 5,
+    });
+    session.destroy();
+  });
+
+  test("modified deletion respects the exact finite-lesson floor and does not intercept Ctrl+W", () => {
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "one two three" }] }]),
+      container,
+      settings: makeSettings(),
+      startAt: { sectionIndex: 0, blockIndex: 0, charIndex: 6 },
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    // Mid-word resume exposes the whole word as editable context, but never
+    // allows either word- or line-delete to escape its rendered floor.
+    pressModifiedBackspace(input, { altKey: true });
+    expect(session.getPosition().charIndex).toBe(4);
+    pressModifiedBackspace(input, { ctrlKey: true });
+    expect(session.getPosition().charIndex).toBe(4);
+    pressModifiedBackspace(input, { metaKey: true });
+    expect(session.getPosition().charIndex).toBe(4);
+
+    const ctrlW = new KeyboardEvent("keydown", {
+      key: "w",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(ctrlW);
+    expect(ctrlW.defaultPrevented).toBe(false);
+    expect(session.getPosition().charIndex).toBe(4);
+
+    const forward = new KeyboardEvent("keydown", {
+      key: "Delete",
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(forward);
+    expect(forward.defaultPrevented).toBe(true);
+    expect(session.getPosition().charIndex).toBe(4);
+    session.destroy();
+  });
+
+  test("bulk word deletion clears a red pilcrow and the preceding word", () => {
+    const session = new TypingSession({
+      book: makeBook([
+        { id: "ch1", blocks: [{ text: "Apollo" }, { text: "returns" }] },
+      ]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    typeText(input, "Apollo");
+    pressChar(input, " ");
+    expect(container.querySelector(".scr-boundary--incorrect")).not.toBeNull();
+
+    pressModifiedBackspace(input, { altKey: true });
+    expect(session.getPosition()).toEqual({
+      sectionIndex: 0,
+      blockIndex: 0,
+      charIndex: 0,
+    });
+    expect(container.querySelector(".scr-boundary--incorrect")).toBeNull();
     session.destroy();
   });
 });

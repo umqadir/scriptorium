@@ -37,22 +37,13 @@
   min-width: 0;
 }
 
-/* Prose participates in the browser's normal inline formatting context.
- * The bounded fragment is short enough to balance without hiding content;
- * verse/headings retain source-line flex rows and are never balanced. */
+/* Prose uses the browser's greedy inline line breaking. Balancing finite
+ * fragments can move a final word onto its own row even when the preceding
+ * row has usable width. Verse/headings retain source-line flex rows. */
 .scr-block--paragraph,
 .scr-block--blockquote {
   display: block;
-  text-wrap: balance;
-}
-
-@media (max-width: 640px) {
-  .scr-block--paragraph,
-  .scr-block--blockquote {
-    /* Long narrow fragments can exceed browsers' balancing limit. Pretty
-     * wrapping still avoids avoidable orphans without over-reflowing input. */
-    text-wrap: pretty;
-  }
+  text-wrap: wrap;
 }
 
 .scr-word {

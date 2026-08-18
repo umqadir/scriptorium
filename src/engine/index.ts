@@ -37,7 +37,6 @@ import {
 } from "./text-model";
 import {
   createBlockState,
-  wordHadError,
   wordIsCurrentlyCorrect,
   type BlockState,
 } from "./block-state";
@@ -94,6 +93,10 @@ export type LessonSkipResult = {
 const PROGRESS_DEBOUNCE_MS = 1000;
 const SAMPLE_INTERVAL_MS = 1000;
 const STATS_INTERVAL_MS = 250;
+// Safari does not reliably emit backward-delete input events for an already
+// empty form control. Keybr uses the same non-empty sentinel technique; it is
+// never part of Block.text and is stripped from value-only input fallback.
+const INPUT_SENTINEL = "?";
 /** @deprecated Use DEFAULT_LESSON_LENGTH from src/types. */
 export const LESSON_TARGET_NON_SPACE_CHARS = DEFAULT_LESSON_LENGTH;
 
@@ -119,8 +122,11 @@ export class TypingSession {
   private spanIndex = new Map<string, HTMLSpanElement>();
   private extrasIndex = new Map<string, HTMLSpanElement>();
   private boundaryIndex = new Map<string, HTMLSpanElement>();
-  /** Reversible, non-canonical printable input entered at a pilcrow. */
-  private readonly boundaryErrors = new Map<string, number>();
+  /** Reversible, non-canonical printable input entered at a pilcrow. The
+   * marker exposes only one incorrect state, so correction is deliberately
+   * boolean rather than an invisible per-key counter. Historical error stats
+   * still count every wrong key. */
+  private readonly boundaryErrors = new Set<string>();
   private renderedBlocks = new Set<string>();
 
   private readonly clock: SessionClock;
@@ -184,6 +190,7 @@ export class TypingSession {
     this.started = true;
     this.dom = buildDom(this.container, this.settings);
     this.attachListeners();
+    this.clearHiddenInput();
     this.rebuildRenderWindow();
     this.hideCaret();
     this.focusInput();
@@ -367,6 +374,7 @@ export class TypingSession {
     applyVisibleLineCount(this.dom.rootEl, settings.contextLines);
     applyCaretStyle(this.dom.caretEl, settings.caretStyle);
     applySmoothCaret(this.dom.caretEl, settings.smoothCaret);
+    this.refreshBoundaryState(this.position.sectionIndex, this.position.blockIndex);
     this.updateCaret();
   }
 
@@ -383,7 +391,20 @@ export class TypingSession {
         e.preventDefault();
         this.armInputSuppression(true, true);
         this.clearHiddenInput();
-        this.handleBackspace();
+        // Command+Backspace means "visual line" in native editors. A source
+        // block can be an arbitrarily long wrapped paragraph, so treating it
+        // as that line would be destructively surprising. Keep it a no-op.
+        if (e.metaKey) return;
+        if (e.altKey || e.ctrlKey) this.handleDeleteWordBackward();
+        else this.handleBackspace();
+        return;
+      }
+      if (e.key === "Delete") {
+        // The engine has no editable future selection. Prevent the hidden
+        // input from manufacturing state without moving canonical Position.
+        e.preventDefault();
+        this.armInputSuppression(true, true);
+        this.clearHiddenInput();
         return;
       }
       if (e.key === "Enter") {
@@ -420,6 +441,31 @@ export class TypingSession {
       if (e.inputType === "deleteContentBackward") {
         if (e.cancelable) e.preventDefault();
         this.handleBackspace();
+        this.armInputSuppression(false, true);
+        this.clearHiddenInput();
+        return;
+      }
+
+      if (e.inputType === "deleteWordBackward") {
+        if (e.cancelable) e.preventDefault();
+        this.handleDeleteWordBackward();
+        this.armInputSuppression(false, true);
+        this.clearHiddenInput();
+        return;
+      }
+
+      if (
+        e.inputType === "deleteSoftLineBackward" ||
+        e.inputType === "deleteHardLineBackward"
+      ) {
+        if (e.cancelable) e.preventDefault();
+        this.armInputSuppression(false, true);
+        this.clearHiddenInput();
+        return;
+      }
+
+      if (this.isUnsupportedForwardDelete(e.inputType)) {
+        if (e.cancelable) e.preventDefault();
         this.armInputSuppression(false, true);
         this.clearHiddenInput();
         return;
@@ -469,6 +515,25 @@ export class TypingSession {
         return;
       }
 
+      if (e.inputType === "deleteWordBackward") {
+        this.clearHiddenInput();
+        this.handleDeleteWordBackward();
+        return;
+      }
+
+      if (
+        e.inputType === "deleteSoftLineBackward" ||
+        e.inputType === "deleteHardLineBackward"
+      ) {
+        this.clearHiddenInput();
+        return;
+      }
+
+      if (this.isUnsupportedForwardDelete(e.inputType)) {
+        this.clearHiddenInput();
+        return;
+      }
+
       if (
         e.inputType === "insertParagraph" ||
         e.inputType === "insertLineBreak"
@@ -482,7 +547,10 @@ export class TypingSession {
       // value (with null `data`). The input is cleared after every event, so
       // the value is just this edit rather than an accumulating second text
       // model. `data` remains a defensive fallback for synthetic browsers.
-      const data = input.value || e.data || "";
+      const value = input.value.startsWith(INPUT_SENTINEL)
+        ? input.value.slice(INPUT_SENTINEL.length)
+        : input.value;
+      const data = value || e.data || "";
       this.clearHiddenInput();
       this.handleTextInput(data);
     };
@@ -560,7 +628,14 @@ export class TypingSession {
   }
 
   private clearHiddenInput(): void {
-    if (this.dom) this.dom.hiddenInputEl.value = "";
+    const input = this.dom?.hiddenInputEl;
+    if (!input) return;
+    input.value = INPUT_SENTINEL;
+    try {
+      input.setSelectionRange(INPUT_SENTINEL.length, INPUT_SENTINEL.length);
+    } catch {
+      // Text inputs support selections, but keep cleanup safe in unusual DOMs.
+    }
   }
 
   /** Suppression flags live for only the current browser edit event turn.
@@ -582,6 +657,16 @@ export class TypingSession {
       element.closest(
         'button, input, select, textarea, a[href], [contenteditable="true"], [tabindex]:not([tabindex="-1"])',
       ),
+    );
+  }
+
+  private isUnsupportedForwardDelete(inputType: string): boolean {
+    return (
+      inputType === "deleteContentForward" ||
+      inputType === "deleteWordForward" ||
+      inputType === "deleteSoftLineForward" ||
+      inputType === "deleteHardLineForward" ||
+      inputType === "deleteEntireSoftLine"
     );
   }
 
@@ -611,8 +696,7 @@ export class TypingSession {
       // must never advance or become an extra in Block.text.
       this.recordKeystroke(false);
       if (findNextBlock(this.book, sectionIndex, blockIndex) !== null) {
-        const key = blockKey(sectionIndex, blockIndex);
-        this.boundaryErrors.set(key, (this.boundaryErrors.get(key) ?? 0) + 1);
+        this.boundaryErrors.add(blockKey(sectionIndex, blockIndex));
       }
       this.setBoundaryState(sectionIndex, blockIndex, "incorrect");
       return;
@@ -702,16 +786,6 @@ export class TypingSession {
       return;
     }
 
-    if (this.boundaryErrorCount(sectionIndex, blockIndex) > 0) {
-      // Enter is a failed commit while reversible boundary extras remain.
-      // It counts for accuracy, but does not itself add another extra that
-      // the user would unexpectedly need to backspace away.
-      this.recordKeystroke(false);
-      this.setBoundaryState(sectionIndex, blockIndex, "incorrect");
-      this.updateCaret();
-      return;
-    }
-
     if (!this.finalWordCanCommit(sectionIndex, blockIndex, block)) {
       this.recordKeystroke(false);
       this.setBoundaryState(sectionIndex, blockIndex, "incorrect");
@@ -737,35 +811,114 @@ export class TypingSession {
 
     const { sectionIndex, blockIndex, charIndex } = this.position;
     const currentBlock = this.getBlock(sectionIndex, blockIndex);
-    const boundaryErrorCount = this.boundaryErrorCount(sectionIndex, blockIndex);
+    const hasBoundaryError = this.hasBoundaryError(sectionIndex, blockIndex);
     if (
       currentBlock &&
       charIndex === currentBlock.text.length &&
-      boundaryErrorCount > 0
+      hasBoundaryError
     ) {
       const key = blockKey(sectionIndex, blockIndex);
-      const remaining = boundaryErrorCount - 1;
-      if (remaining === 0) this.boundaryErrors.delete(key);
-      else this.boundaryErrors.set(key, remaining);
-      this.setBoundaryState(
-        sectionIndex,
-        blockIndex,
-        remaining === 0 ? "pending" : "incorrect",
-      );
+      this.boundaryErrors.delete(key);
+      this.refreshBoundaryState(sectionIndex, blockIndex);
       this.updateCaret();
       return;
     }
 
     if (currentBlock && charIndex >= currentBlock.text.length) {
-      this.setBoundaryState(sectionIndex, blockIndex, "pending");
+      this.refreshBoundaryState(sectionIndex, blockIndex);
     }
 
     const beforeKey = blockKey(this.position.sectionIndex, this.position.blockIndex);
     this.performBackspaceStep();
     const afterKey = blockKey(this.position.sectionIndex, this.position.blockIndex);
     if (beforeKey !== afterKey) this.rebuildRenderWindow();
+    else this.refreshBoundaryState(sectionIndex, blockIndex);
     this.updateCaret();
     this.scheduleProgressSave();
+  }
+
+  /** Browser-conventional Option/Ctrl+Backspace. This is an explicit edit,
+   * so it deletes the current/prior word even when that word was correct,
+   * while the finite lesson floor remains absolute. */
+  private handleDeleteWordBackward(): void {
+    if (this.destroyed || this.finished || this.pausedExplicitly) return;
+    const target = this.clampToBackspaceFloor(this.previousWordStart());
+    this.deleteBackwardTo(target);
+  }
+
+  private deleteBackwardTo(target: Position): void {
+    this.clock.recordActivity();
+    this.ensureTimersRunning();
+
+    const origin = { ...this.position };
+    const originKey = blockKey(origin.sectionIndex, origin.blockIndex);
+    this.boundaryErrors.delete(originKey);
+
+    // `performBackspaceStep` removes visible extras before canonical chars.
+    // Include extras at the target word itself, but stop immediately if the
+    // floor prevents any further canonical movement.
+    while (
+      comparePositions(this.position, target) > 0 ||
+      this.currentExtraCount() > 0
+    ) {
+      const before = { ...this.position };
+      const extrasBefore = this.currentExtraCount();
+      this.performBackspaceStep();
+      if (
+        this.positionsEqual(before, this.position) &&
+        extrasBefore === this.currentExtraCount()
+      ) {
+        break;
+      }
+    }
+
+    const currentKey = blockKey(this.position.sectionIndex, this.position.blockIndex);
+    if (currentKey !== originKey) this.rebuildRenderWindow();
+    else this.refreshBoundaryState(origin.sectionIndex, origin.blockIndex);
+    this.updateCaret();
+    this.scheduleProgressSave();
+  }
+
+  private previousWordStart(): Position {
+    const { sectionIndex, blockIndex, charIndex } = this.position;
+    const block = this.getBlock(sectionIndex, blockIndex);
+    if (!block) return { ...this.position };
+
+    if (charIndex > 0) {
+      let probe = Math.min(charIndex, block.text.length);
+      // At the start of a word, native word deletion consumes the preceding
+      // delimiter and the preceding word rather than becoming a no-op.
+      while (probe > 0 && block.text[probe - 1] === " ") probe -= 1;
+      return {
+        sectionIndex,
+        blockIndex,
+        charIndex: getWordStart(block.text, probe),
+      };
+    }
+
+    const previous = findPreviousBlock(this.book, sectionIndex, blockIndex);
+    if (!previous) return { ...this.position };
+    const previousBlock = this.getBlock(previous.sectionIndex, previous.blockIndex);
+    if (!previousBlock) return { ...this.position };
+    return {
+      sectionIndex: previous.sectionIndex,
+      blockIndex: previous.blockIndex,
+      charIndex: getWordStart(previousBlock.text, previousBlock.text.length),
+    };
+  }
+
+  private clampToBackspaceFloor(target: Position): Position {
+    return comparePositions(target, this.lessonBackspaceFloorPosition) < 0
+      ? { ...this.lessonBackspaceFloorPosition }
+      : target;
+  }
+
+  private currentExtraCount(): number {
+    const { sectionIndex, blockIndex, charIndex } = this.position;
+    const block = this.getBlock(sectionIndex, blockIndex);
+    if (!block) return 0;
+    const wordStart = getWordStart(block.text, charIndex);
+    return this.blockStateFor(sectionIndex, blockIndex).extras.get(wordStart)?.length ?? 0;
   }
 
   private performBackspaceStep(): void {
@@ -800,8 +953,6 @@ export class TypingSession {
       // wordStart === charIndex: crossing into the previous word, which
       // ends with the delimiter space at charIndex - 1, in this block.
       const delimiterIndex = charIndex - 1;
-      const prevWordStart = getWordStart(text, delimiterIndex);
-      if (!wordHadError(state, prevWordStart, delimiterIndex)) return; // gated
       this.position = { sectionIndex, blockIndex, charIndex: delimiterIndex };
       this.performBackspaceStep();
       return;
@@ -814,9 +965,6 @@ export class TypingSession {
     const prevBlock = this.getBlock(prevLoc.sectionIndex, prevLoc.blockIndex);
     if (!prevBlock) return;
     const prevText = prevBlock.text;
-    const prevWordStart = getWordStart(prevText, prevText.length);
-    const prevState = this.blockStateFor(prevLoc.sectionIndex, prevLoc.blockIndex);
-    if (!wordHadError(prevState, prevWordStart, prevText.length)) return; // gated
 
     this.position = {
       sectionIndex: prevLoc.sectionIndex,
@@ -887,6 +1035,7 @@ export class TypingSession {
     if (!block) return;
 
     if (!this.finalWordCanCommit(sectionIndex, blockIndex, block)) {
+      this.refreshBoundaryState(sectionIndex, blockIndex);
       this.updateCaret();
       return;
     }
@@ -1057,11 +1206,66 @@ export class TypingSession {
     state: BoundaryState,
   ): void {
     const marker = this.boundaryIndex.get(blockKey(sectionIndex, blockIndex));
-    if (marker) setBoundaryClass(marker, state);
+    if (!marker) return;
+    setBoundaryClass(marker, state);
+    marker.setAttribute(
+      "aria-label",
+      state === "incorrect" &&
+        this.finalWordNeedsCorrection(sectionIndex, blockIndex)
+        ? "Correct the final word, then press Enter"
+        : "Press Enter for new line",
+    );
   }
 
-  private boundaryErrorCount(sectionIndex: number, blockIndex: number): number {
-    return this.boundaryErrors.get(blockKey(sectionIndex, blockIndex)) ?? 0;
+  private hasBoundaryError(sectionIndex: number, blockIndex: number): boolean {
+    return this.boundaryErrors.has(blockKey(sectionIndex, blockIndex));
+  }
+
+  private finalWordNeedsCorrection(
+    sectionIndex: number,
+    blockIndex: number,
+  ): boolean {
+    if (this.settings.stopOnError !== "word") return false;
+    const block = this.getBlock(sectionIndex, blockIndex);
+    if (!block) return false;
+    const finalWordStart = getWordStart(block.text, block.text.length);
+    return !wordIsCurrentlyCorrect(
+      this.blockStateFor(sectionIndex, blockIndex),
+      finalWordStart,
+      block.text.length,
+    );
+  }
+
+  private projectedBoundaryState(
+    sectionIndex: number,
+    blockIndex: number,
+  ): BoundaryState {
+    const current = this.position;
+    const isBefore =
+      sectionIndex < current.sectionIndex ||
+      (sectionIndex === current.sectionIndex && blockIndex < current.blockIndex);
+    if (isBefore) return "correct";
+    const block = this.getBlock(sectionIndex, blockIndex);
+    const atActiveBoundary =
+      Boolean(block) &&
+      sectionIndex === current.sectionIndex &&
+      blockIndex === current.blockIndex &&
+      current.charIndex === block!.text.length;
+    if (
+      this.hasBoundaryError(sectionIndex, blockIndex) ||
+      (atActiveBoundary && this.finalWordNeedsCorrection(sectionIndex, blockIndex))
+    ) {
+      return "incorrect";
+    }
+    return "pending";
+  }
+
+  private refreshBoundaryState(sectionIndex: number, blockIndex: number): void {
+    this.setBoundaryState(
+      sectionIndex,
+      blockIndex,
+      this.projectedBoundaryState(sectionIndex, blockIndex),
+    );
   }
 
   private onBlockChanged(): void {
@@ -1125,14 +1329,7 @@ export class TypingSession {
     sectionIndex: number,
     blockIndex: number,
   ): BoundaryState {
-    if (this.boundaryErrorCount(sectionIndex, blockIndex) > 0) {
-      return "incorrect";
-    }
-    const current = this.position;
-    const isBefore =
-      sectionIndex < current.sectionIndex ||
-      (sectionIndex === current.sectionIndex && blockIndex < current.blockIndex);
-    return isBefore ? "correct" : "pending";
+    return this.projectedBoundaryState(sectionIndex, blockIndex);
   }
 
   private isBlockBeforeBackspaceFloor(loc: {

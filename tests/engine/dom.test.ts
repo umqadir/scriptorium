@@ -224,7 +224,7 @@ describe("renderWindow", () => {
     expect(refs.spanIndex.has("1:2:8")).toBe(false);
   });
 
-  test("defines a full-width finite fragment with wrapping block rows", () => {
+  test("defines a full-width finite fragment with greedy prose wrapping", () => {
     // happy-dom does not compute the imported stylesheet, so assert its
     // contract directly and leave geometry to browser QA.
     expect(typingCss).toMatch(
@@ -237,10 +237,13 @@ describe("renderWindow", () => {
     expect(blockRule).not.toMatch(/^\s*width\s*:/m);
     expect(typingCss).toMatch(/\.scr-word\s*\{[^}]*flex:\s*none;/s);
     expect(typingCss).toMatch(
-      /\.scr-block--paragraph,\s*\.scr-block--blockquote\s*\{[^}]*display:\s*block;[^}]*text-wrap:\s*balance;/s,
+      /\.scr-block--paragraph,\s*\.scr-block--blockquote\s*\{[^}]*display:\s*block;[^}]*text-wrap:\s*wrap;/s,
     );
     expect(typingCss).not.toMatch(
-      /\.scr-block--(?:verse|heading)[^{]*\{[^}]*text-wrap:\s*balance;/s,
+      /text-wrap:\s*(?:balance|pretty)/,
+    );
+    expect(typingCss).not.toMatch(
+      /\.scr-block--(?:verse|heading)[^{]*\{[^}]*text-wrap\s*:/s,
     );
     expect(typingCss).toMatch(
       /\.scr-viewport\s*\{[^}]*overflow:\s*visible;[^}]*height:\s*auto;/s,

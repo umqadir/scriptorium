@@ -14,6 +14,7 @@ import {
   type LessonHistoryOutcome,
   type LessonHistoryRecord,
   type LessonNavigationState,
+  type BookProgress,
   type Position,
   type SessionStats,
 } from "../types";
@@ -212,4 +213,67 @@ export async function clearLessonNavigation(bookId: string): Promise<void> {
   }
   const db = await getDb();
   await db.delete("lessonNavigation", bookId);
+}
+
+/**
+ * Persist a durable reader boundary as one local checkpoint. Progress and
+ * finite-lesson navigation must describe the same instant after a refresh,
+ * so neither write is allowed to commit without the other.
+ *
+ * Passing navigation replaces the local navigation epoch. Omitting it
+ * atomically clears navigation, which is used for terminal/reset/type-again
+ * transitions. Lesson navigation remains local-only and is never added to a
+ * sync payload.
+ */
+export async function saveReaderCheckpoint(
+  progress: BookProgress,
+  navigation?: LessonNavigationState,
+): Promise<void> {
+  if (typeof progress.bookId !== "string" || progress.bookId.length === 0) {
+    throw new RangeError("Invalid book progress");
+  }
+
+  const sanitizedNavigation =
+    navigation === undefined
+      ? undefined
+      : sanitizeLessonNavigationState(navigation);
+  if (navigation !== undefined && !sanitizedNavigation) {
+    throw new RangeError("Invalid lesson navigation state");
+  }
+  if (sanitizedNavigation && sanitizedNavigation.bookId !== progress.bookId) {
+    throw new RangeError("Progress and lesson navigation book ids must match");
+  }
+
+  const db = await getDb();
+  const tx = db.transaction(["progress", "lessonNavigation"], "readwrite");
+  // Attach a rejection observer immediately. A later synchronous structured-
+  // clone failure can make the catch path abort before Promise.all is built.
+  void tx.done.catch(() => undefined);
+  try {
+    // Queue navigation first so the rollback test also proves that a later
+    // progress write failure cannot leave a half-committed navigation value.
+    const navigationWrite = sanitizedNavigation
+      ? tx.objectStore("lessonNavigation").put(
+          sanitizedNavigation,
+          sanitizedNavigation.bookId,
+        )
+      : tx.objectStore("lessonNavigation").delete(progress.bookId);
+    void navigationWrite.catch(() => undefined);
+    const progressWrite = tx.objectStore("progress").put(progress, progress.bookId);
+    await Promise.all([navigationWrite, progressWrite, tx.done]);
+  } catch (error) {
+    // IndexedDB request errors normally abort readwrite transactions. Abort
+    // explicitly as well for synchronous clone errors or adapter failures.
+    try {
+      tx.abort();
+    } catch {
+      // The transaction may already have aborted or completed.
+    }
+    try {
+      await tx.done;
+    } catch {
+      // Preserve the original operation error below.
+    }
+    throw error;
+  }
 }

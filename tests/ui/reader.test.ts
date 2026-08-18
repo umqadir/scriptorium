@@ -23,8 +23,9 @@ const storage = vi.hoisted(() => ({
   saveProgress: vi.fn(async () => undefined),
   saveSettings: vi.fn(async () => undefined),
   getLessonNavigation: vi.fn<() => Promise<LessonNavigationState | undefined>>(),
-  saveLessonNavigation: vi.fn(async (_state: LessonNavigationState) => undefined),
-  clearLessonNavigation: vi.fn(async (_bookId: string) => undefined),
+  saveReaderCheckpoint: vi.fn(
+    async (_progress: BookProgress, _navigation?: LessonNavigationState) => undefined
+  ),
 }));
 
 vi.mock("../../src/store/books", async (importOriginal) => ({
@@ -46,8 +47,7 @@ vi.mock("../../src/store/settings", async (importOriginal) => ({
 vi.mock("../../src/store/lesson-navigation", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/store/lesson-navigation")>()),
   getLessonNavigation: storage.getLessonNavigation,
-  saveLessonNavigation: storage.saveLessonNavigation,
-  clearLessonNavigation: storage.clearLessonNavigation,
+  saveReaderCheckpoint: storage.saveReaderCheckpoint,
 }));
 
 import { mountReader } from "../../src/ui/reader";
@@ -82,6 +82,27 @@ function stored(parsed: ParsedBook) {
   return { ...parsed, raw: new Blob(["epub"]) };
 }
 
+function savedProgressSnapshots(): BookProgress[] {
+  const direct = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+  const checkpoints = storage.saveReaderCheckpoint.mock.calls;
+  return [
+    ...direct.map(([progress], index) => ({
+      order: storage.saveProgress.mock.invocationCallOrder[index] ?? 0,
+      progress,
+    })),
+    ...checkpoints.map(([progress], index) => ({
+      order: storage.saveReaderCheckpoint.mock.invocationCallOrder[index] ?? 0,
+      progress,
+    })),
+  ]
+    .sort((a, b) => a.order - b.order)
+    .map(({ progress }) => progress);
+}
+
+function savedNavigationSnapshots(): Array<LessonNavigationState | undefined> {
+  return storage.saveReaderCheckpoint.mock.calls.map(([, navigation]) => navigation);
+}
+
 describe("mountReader", () => {
   beforeEach(() => {
     storage.getBook.mockReset();
@@ -92,10 +113,8 @@ describe("mountReader", () => {
     storage.saveSettings.mockResolvedValue(undefined);
     storage.getLessonNavigation.mockReset();
     storage.getLessonNavigation.mockResolvedValue(undefined);
-    storage.saveLessonNavigation.mockReset();
-    storage.saveLessonNavigation.mockResolvedValue(undefined);
-    storage.clearLessonNavigation.mockReset();
-    storage.clearLessonNavigation.mockResolvedValue(undefined);
+    storage.saveReaderCheckpoint.mockReset();
+    storage.saveReaderCheckpoint.mockResolvedValue(undefined);
     initAppState({ ...DEFAULT_SETTINGS, soundOnClick: false });
     location.hash = "#/reader/book-1";
   });
@@ -127,7 +146,7 @@ describe("mountReader", () => {
 
     expect(host.textContent).toContain("choose sections");
     expect(host.querySelector(".scr-hidden-input")).toBeNull();
-    expect(storage.saveLessonNavigation).not.toHaveBeenCalled();
+    expect(storage.saveReaderCheckpoint).not.toHaveBeenCalled();
     handle.unmount?.();
   });
 
@@ -162,9 +181,47 @@ describe("mountReader", () => {
       text[staleFrontier.end.charIndex],
     );
     await vi.waitFor(() => {
-      const reseeded = storage.saveLessonNavigation.mock.calls.at(-1)?.[0];
+      const reseeded = savedNavigationSnapshots().at(-1);
       expect(reseeded?.frontier.start).toEqual(staleFrontier.end);
       expect(reseeded?.frontier.end).not.toEqual(staleFrontier.end);
+    });
+    handle.unmount?.();
+  });
+
+  test("normalizes a legacy mid-lesson bookmark to its stored anchor start", async () => {
+    const text = Array.from({ length: 30 }, (_, index) => `word${index}`).join(" ");
+    const parsed = book(text);
+    const frontier = makeLessonAnchor(
+      parsed,
+      { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
+      100
+    );
+    const saved = {
+      ...createInitialProgress("book-1", text.length),
+      position: { sectionIndex: 0, blockIndex: 0, charIndex: 5 },
+      charsCompleted: 5,
+      lifetime: { charsTyped: 5, errors: 1, timeMs: 1_000, sessions: 1 },
+    };
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(saved);
+    storage.getLessonNavigation.mockResolvedValue({
+      bookId: "book-1",
+      corpusSignature: lessonCorpusSignature(parsed),
+      history: [],
+      frontier,
+    });
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[0]);
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(0);
+    await vi.waitFor(() => {
+      const snapshots = savedProgressSnapshots();
+      expect(snapshots.at(-1)?.position).toEqual(frontier.start);
+      expect(snapshots.at(-1)?.charsCompleted).toBe(0);
+      expect(snapshots.at(-1)?.lifetime).toEqual(saved.lifetime);
     });
     handle.unmount?.();
   });
@@ -223,7 +280,7 @@ describe("mountReader", () => {
     const handle = mountReader(host, "book-1");
     await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
     await vi.waitFor(() => {
-      expect(storage.saveLessonNavigation.mock.calls.at(-1)?.[0].corpusSignature).toBe(
+      expect(savedNavigationSnapshots().at(-1)?.corpusSignature).toBe(
         expectedSignature,
       );
     });
@@ -344,29 +401,69 @@ describe("mountReader", () => {
     handle.unmount?.();
     await vi.waitFor(() =>
       expect(
-        (storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>).some(
-          ([snapshot]) => snapshot.lifetime.sessions === 1
-        )
+        savedProgressSnapshots().some((snapshot) => snapshot.lifetime.sessions === 1)
       ).toBe(true)
     );
 
-    const snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    const snapshots = savedProgressSnapshots();
     const latest = snapshots.at(-1)!;
     expect(latest.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 1 });
     expect(latest.charsCompleted).toBe(1);
     expect(latest.lifetime.charsTyped).toBe(1);
     expect(latest.lifetime.sessions).toBe(1);
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
-    const navigationSnapshots = storage.saveLessonNavigation.mock.calls.map(
-      ([snapshot]) => snapshot
-    );
+    const navigationSnapshots = savedNavigationSnapshots();
     expect(navigationSnapshots.at(-1)?.history).toEqual([]);
     expect(navigationSnapshots.at(-1)?.frontier).toMatchObject({
       start: { sectionIndex: 0, blockIndex: 0, charIndex: 0 },
       end: { sectionIndex: 0, blockIndex: 0, charIndex: 1 },
     });
+    const boundaryCheckpoint = [...storage.saveReaderCheckpoint.mock.calls]
+      .reverse()
+      .find(([snapshot]) => snapshot.position.charIndex === 1);
+    expect(boundaryCheckpoint?.[0].lifetime.sessions).toBe(1);
+    expect(boundaryCheckpoint?.[1]?.frontier.end.charIndex).toBe(1);
+    expect(storage.saveProgress).not.toHaveBeenCalled();
+  });
+
+  test("type again atomically resets progress and clears navigation without teardown overwrite", async () => {
+    const parsed = book("a");
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 1));
+    const host = document.createElement("main");
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+    host.querySelector(".scr-hidden-input")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", bubbles: true })
+    );
+    await vi.waitFor(() => expect(host.textContent).toContain("book complete"));
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+    storage.saveReaderCheckpoint.mockClear();
+    storage.saveProgress.mockClear();
+    let releaseCheckpoint: (() => void) | undefined;
+    storage.saveReaderCheckpoint.mockImplementationOnce(
+      () => new Promise<undefined>((resolve) => {
+        releaseCheckpoint = () => resolve(undefined);
+      })
+    );
+    const typeAgain = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "type again"
+    );
+    if (!typeAgain) throw new Error("type again button missing");
+    typeAgain.click();
+    await vi.waitFor(() => expect(storage.saveReaderCheckpoint).toHaveBeenCalledTimes(1));
+
+    const [resetProgress, resetNavigation] = storage.saveReaderCheckpoint.mock.calls[0]!;
+    expect(resetProgress.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 0 });
+    expect(resetProgress.charsCompleted).toBe(0);
+    expect(resetNavigation).toBeUndefined();
+    handle.unmount?.();
+    releaseCheckpoint?.();
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    expect(storage.saveReaderCheckpoint).toHaveBeenCalledTimes(1);
+    expect(storage.saveProgress).not.toHaveBeenCalled();
   });
 
   test("allows terminal Skip by control and shortcut without manufacturing a score", async () => {
@@ -388,16 +485,16 @@ describe("mountReader", () => {
     expect(skip.disabled).toBe(false);
     skip.click();
     await vi.waitFor(() => expect(first.host.textContent).toContain("book complete"));
-    let snapshots = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
-    expect(snapshots.at(-1)?.[0].position.charIndex).toBe(6);
-    expect(snapshots.at(-1)?.[0].lifetime.sessions).toBe(0);
+    let snapshots = savedProgressSnapshots();
+    expect(snapshots.at(-1)?.position.charIndex).toBe(6);
+    expect(snapshots.at(-1)?.lifetime.sessions).toBe(0);
     expect(skip.disabled).toBe(true);
     first.handle.unmount?.();
     first.host.remove();
     for (let i = 0; i < 8; i += 1) await Promise.resolve();
 
     storage.saveProgress.mockClear();
-    storage.saveLessonNavigation.mockClear();
+    storage.saveReaderCheckpoint.mockClear();
     const second = await mountAndWait();
     const shortcut = new KeyboardEvent("keydown", {
       key: "ArrowRight",
@@ -408,9 +505,9 @@ describe("mountReader", () => {
     document.dispatchEvent(shortcut);
     expect(shortcut.defaultPrevented).toBe(true);
     await vi.waitFor(() => expect(second.host.textContent).toContain("book complete"));
-    snapshots = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
-    expect(snapshots.at(-1)?.[0].position.charIndex).toBe(6);
-    expect(snapshots.at(-1)?.[0].lifetime.sessions).toBe(0);
+    snapshots = savedProgressSnapshots();
+    expect(snapshots.at(-1)?.position.charIndex).toBe(6);
+    expect(snapshots.at(-1)?.lifetime.sessions).toBe(0);
     second.handle.unmount?.();
     second.host.remove();
   });
@@ -454,15 +551,8 @@ describe("mountReader", () => {
       expect.objectContaining({ lessonLength: 200 })
     );
 
-    let snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(0);
-    expect(snapshots.at(-1)?.position).toEqual({
-      sectionIndex: 0,
-      blockIndex: 0,
-      charIndex: 0,
-    });
+    let snapshots = savedProgressSnapshots();
+    expect(snapshots.every((snapshot) => snapshot.lifetime.sessions === 0)).toBe(true);
 
     // The remounted lesson is idle; the ten-second gap belongs to no result.
     await vi.advanceTimersByTimeAsync(10_000);
@@ -473,11 +563,10 @@ describe("mountReader", () => {
     await vi.advanceTimersByTimeAsync(0);
     for (let i = 0; i < 16; i += 1) await Promise.resolve();
 
-    snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    snapshots = savedProgressSnapshots();
     const latest = snapshots.at(-1)!;
-    expect(latest.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 1 });
+    expect(latest.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 0 });
+    expect(latest.charsCompleted).toBe(0);
     expect(latest.lifetime).toEqual({
       charsTyped: 1,
       errors: 0,
@@ -531,18 +620,14 @@ describe("mountReader", () => {
     expect(storage.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({ lessonLength: 150 })
     );
-    let snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(0);
+    let snapshots = savedProgressSnapshots();
+    expect(snapshots.every((snapshot) => snapshot.lifetime.sessions === 0)).toBe(true);
 
     for (let index = 10; index < 110; index += 1) press(text[index]!);
     expect(host.querySelector(".scr-root")).toBe(root);
     expect(root.querySelectorAll(".scr-char").length).toBeGreaterThan(oldFragmentChars);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    snapshots = savedProgressSnapshots();
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
     expect(snapshots.at(-1)?.position).toEqual({
       sectionIndex: 0,
@@ -553,9 +638,7 @@ describe("mountReader", () => {
     handle.unmount?.();
     await vi.advanceTimersByTimeAsync(0);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    snapshots = savedProgressSnapshots();
     expect(Math.max(...snapshots.map((snapshot) => snapshot.lifetime.sessions))).toBe(1);
     host.remove();
   });
@@ -610,9 +693,7 @@ describe("mountReader", () => {
     expect(liveStats.classList).not.toContain("reader-live-stats-complete");
 
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    let snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    let snapshots = savedProgressSnapshots();
     expect(snapshots.some((snapshot) => snapshot.lifetime.sessions === 1)).toBe(true);
 
     await vi.advanceTimersByTimeAsync(10_000);
@@ -640,9 +721,7 @@ describe("mountReader", () => {
     // A completed lesson is durable before route teardown (crash/reload
     // boundary), not deferred until the whole reader session finishes.
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    snapshots = savedProgressSnapshots();
     const durableCheckpoint = [...snapshots].reverse().find(
       (snapshot) => snapshot.lifetime.sessions === 2
     );
@@ -669,10 +748,10 @@ describe("mountReader", () => {
     await vi.advanceTimersByTimeAsync(0);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
 
-    snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    snapshots = savedProgressSnapshots();
     const latest = snapshots.at(-1)!;
+    expect(latest.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 220 });
+    expect(latest.charsCompleted).toBe(220);
     expect(latest.lifetime).toEqual({
       charsTyped: 221,
       errors: 0,
@@ -734,10 +813,8 @@ describe("mountReader", () => {
     expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[110]);
     expect(document.activeElement).toBe(input);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    let immediateSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(immediateSnapshots.at(-1)?.position.charIndex).toBe(221);
+    const immediateSnapshots = savedProgressSnapshots();
+    expect(immediateSnapshots.at(-1)?.position.charIndex).toBe(220);
 
     // A pause rebuilds the session but must remount the exact historical
     // anchor, including its frozen end, rather than recomposing from settings.
@@ -776,15 +853,14 @@ describe("mountReader", () => {
     expect(forward().getAttribute("aria-label")).toBe("Return to current passage");
     forward().click();
     expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[220]);
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(1);
     expect(forward().getAttribute("aria-label")).toBe("Skip passage");
 
-    let progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    let progressSnapshots = savedProgressSnapshots();
     expect(progressSnapshots.at(-1)?.position).toEqual({
       sectionIndex: 0,
       blockIndex: 0,
-      charIndex: 221,
+      charIndex: 220,
     });
     expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
 
@@ -792,16 +868,14 @@ describe("mountReader", () => {
     forward().click();
     await vi.advanceTimersByTimeAsync(0);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    progressSnapshots = savedProgressSnapshots();
     expect(progressSnapshots.at(-1)?.position).toEqual({
       sectionIndex: 0,
       blockIndex: 0,
       charIndex: 330,
     });
     expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
-    const navigation = storage.saveLessonNavigation.mock.calls.at(-1)?.[0];
+    const navigation = savedNavigationSnapshots().at(-1);
     expect(navigation?.history.at(-1)?.outcome).toBe("skipped");
     expect(navigation?.frontier.start.charIndex).toBe(330);
 
@@ -818,14 +892,12 @@ describe("mountReader", () => {
     expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(0);
     expect(document.activeElement).toBe(input);
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+    progressSnapshots = savedProgressSnapshots();
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(330);
     expect(progressSnapshots.at(-1)?.lifetime.sessions).toBe(2);
 
-    // Escape/resume rebuilds the exact anchor but retains the restart
-    // high-water; teardown must not later queue the visible lower cursor.
+    // Escape/resume rebuilds the exact anchor while the bookmark remains at
+    // the passage boundary.
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     const resumeAfterRestart = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
       (button) => button.textContent === "resume"
@@ -835,48 +907,24 @@ describe("mountReader", () => {
     input = host.querySelector<HTMLElement>(".scr-hidden-input")!;
     expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe(text[330]);
     expect(document.activeElement).toBe(input);
-    progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
+    progressSnapshots = savedProgressSnapshots();
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(330);
 
-    const restartedRoot = host.querySelector(".scr-root");
-    const lessonLength = host.querySelector<HTMLSelectElement>(
-      ".reader-lesson-length-select"
-    )!;
-    lessonLength.value = "150";
-    lessonLength.dispatchEvent(new Event("change", { bubbles: true }));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(host.querySelector(".scr-root")).toBe(restartedRoot);
-    expect(document.querySelector(".toast:last-child")?.textContent).toBe(
-      "150 chars from next lesson"
-    );
-    progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
-
-    const navigationSavesBeforeUnmount = storage.saveLessonNavigation.mock.calls.length;
+    const navigationSavesBeforeUnmount = savedNavigationSnapshots().length;
     handle.unmount?.();
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
-    progressSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
-    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(331);
-    expect(storage.saveLessonNavigation.mock.calls.length).toBeGreaterThan(
-      navigationSavesBeforeUnmount
-    );
-    expect(storage.saveLessonNavigation.mock.calls.at(-1)?.[0].frontier.start.charIndex).toBe(
-      330
-    );
+    progressSnapshots = savedProgressSnapshots();
+    expect(progressSnapshots.at(-1)?.position.charIndex).toBe(330);
+    expect(savedNavigationSnapshots()).toHaveLength(navigationSavesBeforeUnmount);
+    expect(savedNavigationSnapshots().at(-1)?.frontier.start.charIndex).toBe(330);
     host.remove();
   });
 
-  test("persists ordinary frontier Backspace at the exact corrected cursor", async () => {
+  test("keeps a partial lesson route-local and restarts its anchor after remount", async () => {
     vi.useFakeTimers();
-    const parsed = book("abcdef");
+    const parsed = book("abcdef ghijkl");
     storage.getBook.mockResolvedValue(stored(parsed));
-    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 6));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 13));
     const host = document.createElement("main");
 
     const handle = mountReader(host, "book-1");
@@ -888,16 +936,25 @@ describe("mountReader", () => {
     press("a");
     press("b");
     await vi.advanceTimersByTimeAsync(1_000);
-    for (let i = 0; i < 4; i += 1) await Promise.resolve();
-    let saved = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
-    expect(saved.at(-1)?.[0].position.charIndex).toBe(2);
-    press("Backspace");
-    await vi.advanceTimersByTimeAsync(1_000);
-    for (let i = 0; i < 4; i += 1) await Promise.resolve();
-    saved = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
-    expect(saved.at(-1)?.[0].position.charIndex).toBe(1);
-
+    expect(storage.saveProgress).not.toHaveBeenCalled();
     handle.unmount?.();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+    const saved = savedProgressSnapshots();
+    const durable = saved.at(-1);
+    expect(durable?.position).toEqual({ sectionIndex: 0, blockIndex: 0, charIndex: 0 });
+    expect(durable?.charsCompleted).toBe(0);
+    expect(durable?.lifetime).toMatchObject({ charsTyped: 2, sessions: 1 });
+    const navigation = savedNavigationSnapshots().at(-1);
+    storage.getProgress.mockResolvedValue(durable);
+    storage.getLessonNavigation.mockResolvedValue(navigation);
+
+    const remounted = mountReader(host, "book-1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.querySelector(".scr-text .scr-char")?.textContent).toBe("a");
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(0);
+    remounted.unmount?.();
   });
 
   test("shows useful session results on Escape and can resume in place", async () => {
@@ -923,6 +980,12 @@ describe("mountReader", () => {
     if (!resume) throw new Error("resume button missing");
     resume.click();
     expect(host.querySelector(".scr-hidden-input")).not.toBeNull();
+    expect(host.querySelectorAll(".scr-char--correct")).toHaveLength(1);
+    await vi.waitFor(() => {
+      const saved = savedProgressSnapshots();
+      expect(saved.at(-1)?.position.charIndex).toBe(0);
+      expect(saved.at(-1)?.charsCompleted).toBe(0);
+    });
     handle.unmount?.();
   });
 
@@ -963,7 +1026,6 @@ describe("mountReader", () => {
 
     const handle = mountReader(host, "book-1");
     await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
-    await vi.waitFor(() => expect(storage.saveProgress).toHaveBeenCalled());
     storage.saveProgress.mockClear();
     host.querySelector(".scr-hidden-input")!.dispatchEvent(
       new KeyboardEvent("keydown", { key: "a", bubbles: true })
@@ -987,7 +1049,7 @@ describe("mountReader", () => {
     expect(items[0]?.querySelector(".reader-contents-order")?.textContent).toBe("01");
     expect(items[1]?.querySelector(".reader-contents-order")?.textContent).toBe("02");
     expect(items[0]?.getAttribute("aria-current")).toBe("location");
-    expect(items[0]?.textContent).toContain("current · 50%");
+    expect(items[0]?.textContent).toContain("current · 0%");
     expect(host.hasAttribute("inert")).toBe(true);
     expect(host.getAttribute("aria-hidden")).toBe("true");
     expect(host.querySelector(".scr-root")).toBe(originalRoot);
@@ -1012,9 +1074,7 @@ describe("mountReader", () => {
     expect(host.querySelector(".scr-root")).toBe(originalRoot);
     expect(host.querySelector(".scr-char")).toBe(originalSpan);
     expect(host.querySelector(".scr-caret")).toBe(originalCaret);
-    let interimSnapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    const interimSnapshots = savedProgressSnapshots();
     expect(
       interimSnapshots.every((snapshot) => snapshot.lifetime.sessions === 0)
     ).toBe(true);
@@ -1030,16 +1090,20 @@ describe("mountReader", () => {
     );
 
     await vi.waitFor(() => {
-      const saved = storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>;
+      const saved = savedProgressSnapshots();
       expect(
-        saved.some(([snapshot]) => snapshot.position.sectionIndex === 1 && snapshot.position.charIndex === 0)
+        saved.some(
+          (snapshot) =>
+            snapshot.position.sectionIndex === 1 && snapshot.position.charIndex === 0
+        )
       ).toBe(true);
     });
-    const snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    const snapshots = savedProgressSnapshots();
     const outgoingIndex = snapshots.findIndex(
-      (snapshot) => snapshot.position.sectionIndex === 0 && snapshot.position.charIndex === 1
+      (snapshot) =>
+        snapshot.position.sectionIndex === 0 &&
+        snapshot.position.charIndex === 0 &&
+        snapshot.lifetime.sessions === 1
     );
     const targetIndex = snapshots.findIndex(
       (snapshot) => snapshot.position.sectionIndex === 1 && snapshot.position.charIndex === 0
@@ -1119,10 +1183,8 @@ describe("mountReader", () => {
     )!;
     apply.click();
 
-    await vi.waitFor(() => expect(storage.saveProgress).toHaveBeenCalled());
-    const snapshots = (
-      storage.saveProgress.mock.calls as unknown as Array<[BookProgress]>
-    ).map(([snapshot]) => snapshot);
+    await vi.waitFor(() => expect(storage.saveReaderCheckpoint).toHaveBeenCalled());
+    const snapshots = savedProgressSnapshots();
     const latest = snapshots.at(-1)!;
     expect(latest.totalChars).toBe(4);
     expect(latest.charsCompleted).toBe(4);

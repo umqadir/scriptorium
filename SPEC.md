@@ -87,11 +87,15 @@ books and exclude the 196KB intro, 193KB endnotes and 154KB glossary by default.
   state changed — no full re-render per keystroke.
 - Hidden input must set `autocomplete="off" autocorrect="off" autocapitalize="off"
   spellcheck="false"` (Safari will otherwise mangle input).
-- Position autosaves (debounced ~1s) so closing the tab mid-sentence resumes exactly.
+- Progress bookmarks advance only at finite-lesson boundaries (completion,
+  skip, or an explicit section/reset action). Refreshing mid-lesson restarts
+  that lesson from its beginning; same-route pause/resume can retain the live
+  cursor in memory.
 
 ## Storage (`src/store/`)
 
-IndexedDB via `idb`. Stores: `books` (ParsedBook + raw Blob), `progress`, `settings`.
+IndexedDB via `idb`. Stores: `books` (ParsedBook + raw Blob), `progress`,
+`lessonNavigation` (local-only finite-lesson history), and `settings`.
 Books are multi-MB — localStorage is not an option.
 
 Sync is opt-in and manual-first: export/import a `SyncPayload` JSON file. If a

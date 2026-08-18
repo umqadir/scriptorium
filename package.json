@@ -20,6 +20,7 @@
     "pdfjs-dist": "6.2.108"
   },
   "devDependencies": {
+    "fake-indexeddb": "6.2.5",
     "happy-dom": "^15.11.6",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",

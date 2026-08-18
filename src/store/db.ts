@@ -2,11 +2,11 @@
  * Thin IndexedDB boundary. This module is the ONLY place that talks to
  * `idb`/IndexedDB directly. Everything above it (books.ts, progress.ts,
  * settings.ts, sync.ts) works against plain data and small pure helper
- * functions that don't need a real or fake IndexedDB to test — that's the
- * "logic behind a thin boundary" the spec asks for. There is no
- * fake-indexeddb in this project, so we deliberately keep this file free of
- * unit-testable business logic; the business logic lives in the sibling
- * modules and is tested there directly.
+ * functions that don't need IndexedDB to test — that's the "logic behind a
+ * thin boundary" the spec asks for. Business logic lives in sibling modules
+ * and is tested there directly. Transaction integration tests use
+ * fake-indexeddb to verify commit and rollback behavior against the real idb
+ * wrapper without introducing a production dependency.
  *
  * Schema (version 2):
  *   - bookMeta: BookMeta, keyed by `id`. Small — this is what `listBooks`

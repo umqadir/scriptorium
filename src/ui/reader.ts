@@ -10,9 +10,8 @@ import {
 import { getBook, type StoredBook } from "../store/books";
 import {
   LESSON_HISTORY_LIMIT,
-  clearLessonNavigation,
   getLessonNavigation,
-  saveLessonNavigation,
+  saveReaderCheckpoint,
 } from "../store/lesson-navigation";
 import {
   accumulateLifetime,
@@ -186,7 +185,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let routeTotals: SessionTotals = { ...EMPTY_TOTALS };
   let peakWpm = 0;
   let saveChain: Promise<void> = Promise.resolve();
-  let lessonNavigationSaveChain: Promise<void> = Promise.resolve();
   let lessonNavigation: LessonNavigationState | undefined;
   /** Null means the durable frontier; a number indexes prior replay history. */
   let replayHistoryIndex: number | null = null;
@@ -194,7 +192,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   let navigationBusy = false;
   let suppressProgressPersistence = false;
   let suppressBookCompletionOnce = false;
-  let restartHighWater: Position | undefined;
   let chooserResumePosition: Position | undefined;
   let pausedPosition: Position | undefined;
   let pausedAnchor: LessonAnchor | undefined;
@@ -217,7 +214,36 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   shell.appendChild(loading);
   container.appendChild(shell);
 
-  const queueSave = (snapshot: BookProgress): void => {
+  const snapshotProgress = (value: BookProgress): BookProgress => ({
+    ...value,
+    position: { ...value.position },
+    lifetime: { ...value.lifetime },
+    sectionOverrides: { ...value.sectionOverrides },
+  });
+
+  const snapshotNavigation = (
+    value: LessonNavigationState
+  ): LessonNavigationState => ({
+    bookId: value.bookId,
+    corpusSignature: value.corpusSignature,
+    history: value.history.map((record) => ({
+      ...record,
+      anchor: {
+        ...record.anchor,
+        start: { ...record.anchor.start },
+        end: { ...record.anchor.end },
+      },
+      ...(record.result ? { result: { ...record.result } } : {}),
+    })),
+    frontier: {
+      ...value.frontier,
+      start: { ...value.frontier.start },
+      end: { ...value.frontier.end },
+    },
+  });
+
+  const queueSave = (value: BookProgress): void => {
+    const snapshot = snapshotProgress(value);
     saveChain = saveChain
       .then(() => saveProgress(snapshot))
       .catch((error: unknown) => {
@@ -226,31 +252,19 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       });
   };
 
-  const queueLessonNavigationSave = (): void => {
-    if (!lessonNavigation) return;
-    const snapshot: LessonNavigationState = {
-      bookId: lessonNavigation.bookId,
-      corpusSignature: lessonNavigation.corpusSignature,
-      history: lessonNavigation.history.map((record) => ({
-        ...record,
-        anchor: {
-          ...record.anchor,
-          start: { ...record.anchor.start },
-          end: { ...record.anchor.end },
-        },
-        ...(record.result ? { result: { ...record.result } } : {}),
-      })),
-      frontier: {
-        ...lessonNavigation.frontier,
-        start: { ...lessonNavigation.frontier.start },
-        end: { ...lessonNavigation.frontier.end },
-      },
-    };
-    lessonNavigationSaveChain = lessonNavigationSaveChain
-      .then(() => saveLessonNavigation(snapshot))
+  const queueCheckpoint = (
+    navigation: LessonNavigationState | undefined
+  ): void => {
+    if (!progress) return;
+    const progressSnapshot = snapshotProgress(progress);
+    const navigationSnapshot = navigation
+      ? snapshotNavigation(navigation)
+      : undefined;
+    saveChain = saveChain
+      .then(() => saveReaderCheckpoint(progressSnapshot, navigationSnapshot))
       .catch((error: unknown) => {
-        console.error("Failed to save passage history", error);
-        if (!cancelled) showToast("Couldn't save passage history.", "error");
+        console.error("Failed to save reader checkpoint", error);
+        if (!cancelled) showToast("Couldn't save your reading checkpoint.", "error");
       });
   };
 
@@ -280,12 +294,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     replayHistoryIndex = null;
     frontierCursor = { ...position };
     frontierCompletedStats = undefined;
-    lessonNavigationSaveChain = lessonNavigationSaveChain
-      .then(() => clearLessonNavigation(bookId))
-      .catch((error: unknown) => {
-        console.error("Failed to clear stale passage history", error);
-      });
-    queueLessonNavigationSave();
     return frontier;
   };
 
@@ -403,17 +411,17 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       errors: stats.errors,
       timeMs: stats.elapsedMs,
     });
-    // Each immutable lesson/partial run is durable independently. Later
-    // route finalization updates position only and must never re-add it.
-    queueSave(progress);
+    // A natural lesson result and its boundary bookmark become durable
+    // together. Later route finalization must never re-add the result.
   };
 
-  const commitReplayRun = (stats: SessionStats): void => {
-    if (!progress || !runtimeBook || !frontierCursor || stats.charsTyped === 0) return;
+  /** Persist a real scored partial without moving the durable lesson bookmark. */
+  const commitPartialRun = (stats: SessionStats, shouldQueue = true): void => {
+    if (!progress || stats.charsTyped === 0) return;
     addRunToRouteTotals(stats);
     progress = applyProgressUpdate(progress, {
-      position: frontierCursor,
-      charsCompleted: charsAtPosition(runtimeBook, frontierCursor),
+      position: progress.position,
+      charsCompleted: progress.charsCompleted,
       wpm: stats.wpm,
     });
     progress = accumulateLifetime(progress, {
@@ -421,7 +429,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       errors: stats.errors,
       timeMs: stats.elapsedMs,
     });
-    queueSave(progress);
+    if (shouldQueue) queueSave(progress);
+  };
+
+  const commitReplayRun = (stats: SessionStats): void => {
+    commitPartialRun(stats, false);
   };
 
   const discardCurrentSession = (): {
@@ -456,15 +468,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     const stats = current.getStats();
     const anchor = current.getLessonAnchor();
     if (runtimeBook && progress && atFrontier()) {
-      const durablePosition = restartHighWater && comparePositions(position, restartHighWater) < 0
-        ? restartHighWater
-        : position;
-      frontierCursor = { ...durablePosition };
-      const charsCompleted = charsAtPosition(runtimeBook, durablePosition);
+      frontierCursor = { ...position };
       if (stats.charsTyped > 0) {
-        commitRun(stats, durablePosition, charsCompleted);
+        commitPartialRun(stats);
         latestStats = stats;
-      } else persistProgress(durablePosition, charsCompleted, stats.wpm);
+      }
     }
     suppressProgressPersistence = !atFrontier();
     current.destroy();
@@ -484,19 +492,24 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     lifetimeFinalized = true;
 
     if (progress && runtimeBook) {
-      const position = wasReplay
+      const displayPosition = wasReplay
         ? frontierCursor ?? progress.position
-        : frontierCursor ?? stopped?.position ?? progress.position;
-      const charsCompleted = completed
-        ? progress.totalChars
-        : charsAtPosition(runtimeBook, position);
-      progress = applyProgressUpdate(progress, {
-        position,
-        charsCompleted,
-        wpm: peakWpm,
-      });
-      queueSave(progress);
-      if (!cancelled) updateChrome(position, charsCompleted, combined);
+        : stopped?.position ?? frontierCursor ?? progress.position;
+      if (!completed) {
+        progress = applyProgressUpdate(progress, {
+          position: progress.position,
+          charsCompleted: progress.charsCompleted,
+          wpm: peakWpm,
+        });
+        queueSave(progress);
+      }
+      if (!cancelled) {
+        updateChrome(
+          displayPosition,
+          charsAtPosition(runtimeBook, displayPosition),
+          combined
+        );
+      }
     }
     return combined;
   };
@@ -557,7 +570,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
                   const button = event.currentTarget as HTMLButtonElement;
                   button.disabled = true;
                   const start = firstIncludedPosition(runtimeBook!);
-                  persistProgress(start, 0, undefined);
+                  lessonNavigation = undefined;
+                  persistProgress(start, 0, undefined, false);
+                  queueCheckpoint(undefined);
                   await saveChain;
                   if (!cancelled) navigate({ name: "reader", bookId });
                 },
@@ -585,13 +600,8 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (!session || !runtimeBook || !progress) return undefined;
     session.pause();
     const position = session.getPosition();
-    const stats = session.getStats();
     if (atFrontier()) {
-      if (!restartHighWater || comparePositions(position, restartHighWater) >= 0) {
-        restartHighWater = undefined;
-        frontierCursor = { ...position };
-        persistProgress(position, charsAtPosition(runtimeBook, position), stats.wpm);
-      }
+      frontierCursor = { ...position };
     }
     return position;
   };
@@ -681,21 +691,12 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (!session || !lessonNavigation || !runtimeBook) return;
     if (historyIndex !== null && atFrontier()) {
       // mountLesson cancels the outgoing lesson's debounced progress callback.
-      // Snapshot its live cursor synchronously before replacing the DOM. A
-      // restart floor remains the durable high-water until it is retyped.
+      // Snapshot its live cursor synchronously before replacing the DOM. It
+      // remains route-local; the durable bookmark stays at frontier.start.
       const livePosition = session.getPosition();
-      const durablePosition = restartHighWater && comparePositions(livePosition, restartHighWater) < 0
-        ? restartHighWater
-        : livePosition;
-      frontierCursor = { ...durablePosition };
-      persistProgress(
-        durablePosition,
-        charsAtPosition(runtimeBook, durablePosition),
-        session.getStats().wpm
-      );
+      frontierCursor = { ...livePosition };
     }
     navigationBusy = true;
-    restartHighWater = undefined;
     updateLessonNavigationControls();
     try {
       if (historyIndex === null) {
@@ -732,26 +733,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   const restartPassage = (): void => {
     if (!session || navigationBusy) return;
     navigationBusy = true;
-    if (atFrontier() && runtimeBook) {
-      const livePosition = session.getPosition();
-      let durablePosition = livePosition;
-      for (const candidate of [frontierCursor, restartHighWater]) {
-        if (candidate && comparePositions(candidate, durablePosition) > 0) {
-          durablePosition = candidate;
-        }
-      }
-      restartHighWater = { ...durablePosition };
-      frontierCursor = { ...durablePosition };
-      persistProgress(
-        durablePosition,
-        charsAtPosition(runtimeBook, durablePosition),
-        session.getStats().wpm
-      );
-    }
     updateLessonNavigationControls();
     try {
       session.restartLesson();
       const anchor = session.getLessonAnchor();
+      if (atFrontier()) frontierCursor = { ...anchor.start };
       const indicator = replayHistoryIndex === null
         ? frontierCompletedStats
         : lessonNavigation?.history[replayHistoryIndex]?.result;
@@ -780,7 +766,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     }
 
     navigationBusy = true;
-    restartHighWater = undefined;
     updateLessonNavigationControls();
     try {
       const skipped = session.skipLesson();
@@ -788,17 +773,18 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       persistProgress(
         frontierCursor,
         charsAtPosition(runtimeBook, frontierCursor),
-        undefined
+        undefined,
+        false
       );
       if (skipped.next) {
         appendHistoryRecord({ anchor: skipped.skipped, outcome: "skipped" });
         lessonNavigation = { ...lessonNavigation, frontier: skipped.next };
-        queueLessonNavigationSave();
+        queueCheckpoint(lessonNavigation);
         showMountedPassage(skipped.next.start, frontierCompletedStats);
         session.resume();
       } else if (skipped.bookComplete) {
         lessonNavigation = { ...lessonNavigation, frontier: skipped.skipped };
-        queueLessonNavigationSave();
+        queueCheckpoint(lessonNavigation);
         session.destroy();
         session = null;
         lifetimeFinalized = true;
@@ -827,13 +813,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         const displayStats =
           stats.charsTyped > 0 && stats.elapsedMs > 0 ? stats : latestStats;
         if (atFrontier()) {
-          // Frontier Backspace is real resume state and may legitimately move
-          // backward inside the frozen passage. Only replay is write-suppressed.
-          if (!restartHighWater || comparePositions(position, restartHighWater) >= 0) {
-            restartHighWater = undefined;
-            frontierCursor = { ...position };
-            persistProgress(position, charsCompleted, displayStats?.wpm);
-          }
+          // Live typing remains resumable within this route, but only a
+          // completed/skipped lesson advances the durable BookProgress.
+          frontierCursor = { ...position };
         }
         updateChrome(position, charsCompleted, displayStats);
       },
@@ -864,15 +846,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
                   : item
               ),
             };
-            queueLessonNavigationSave();
           }
           commitReplayRun(stats);
+          queueCheckpoint(lessonNavigation);
           suppressBookCompletionOnce =
             Boolean(completedAnchor) &&
             charsAtPosition(runtimeBook!, completedAnchor!.end) >= progress!.totalChars;
           completedBook = suppressBookCompletionOnce;
         } else {
-          restartHighWater = undefined;
           frontierCursor = { ...position };
           commitRun(stats, position, charsAtPosition(runtimeBook!, position));
           frontierCompletedStats = stats;
@@ -894,8 +875,8 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
               lessonNavigation = { ...lessonNavigation, frontier: completedAnchor };
               completedBook = true;
             }
-            queueLessonNavigationSave();
           }
+          queueCheckpoint(lessonNavigation);
         }
         latestStats = stats;
         updateChrome(position, charsAtPosition(runtimeBook!, position), stats, true);
@@ -946,15 +927,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     const absoluteChars = charsAtPosition(runtimeBook, normalized);
     progress = { ...progress, totalChars: computeTotalChars(runtimeBook.sections, {}) };
     if (atFrontier()) {
-      const durablePosition = restartHighWater && comparePositions(normalized, restartHighWater) < 0
-        ? restartHighWater
-        : normalized;
-      frontierCursor = { ...durablePosition };
-      persistProgress(
-        durablePosition,
-        charsAtPosition(runtimeBook, durablePosition),
-        undefined
-      );
+      frontierCursor = { ...normalized };
     }
     const startingStats = created.getStats();
     updateChrome(
@@ -1021,16 +994,15 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     if (!hasTypeableSection(runtimeBook)) {
       lessonNavigation = undefined;
       replayHistoryIndex = null;
-      lessonNavigationSaveChain = lessonNavigationSaveChain.then(() =>
-        clearLessonNavigation(bookId)
-      );
-      queueSave(progress);
+      queueCheckpoint(undefined);
       renderNoSections();
       return;
     }
     const currentAbsolute = charsAtPosition(runtimeBook, progress.position);
     if (wasFinalized && currentAbsolute >= progress.totalChars) {
-      queueSave(progress);
+      lessonNavigation = undefined;
+      replayHistoryIndex = null;
+      queueCheckpoint(undefined);
       updateChrome(progress.position, progress.totalChars);
       renderCompletion();
       return;
@@ -1049,7 +1021,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     chooserResumePosition = undefined;
     pausedPosition = undefined;
     const anchor = resetLessonNavigationEpoch(requested);
-    startSession(requested, anchor);
+    const boundary = anchor?.start ?? requested;
+    persistProgress(boundary, charsAtPosition(runtimeBook, boundary), undefined, false);
+    queueCheckpoint(lessonNavigation);
+    startSession(boundary, anchor);
   };
 
   const sectionProgressLabel = (sectionIndex: number, position: Position): string => {
@@ -1078,9 +1053,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     // temporarily paused run is committed exactly once here, not on open.
     stopCurrentRun();
     closeChooser(false);
-    // Do not start the destination engine until the outgoing snapshot is durable.
-    await saveChain;
-    if (cancelled) return;
     if (wasFinalized) {
       lifetimeFinalized = false;
       finalStats = undefined;
@@ -1092,7 +1064,14 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
     chooserResumePosition = undefined;
     pausedPosition = undefined;
     const anchor = resetLessonNavigationEpoch(target);
-    startSession(target, anchor);
+    const boundary = anchor?.start ?? target;
+    persistProgress(boundary, charsAtPosition(runtimeBook, boundary), undefined, false);
+    queueCheckpoint(lessonNavigation);
+    // Do not start the destination engine until its atomic checkpoint and the
+    // preceding outgoing partial-stat snapshot are durable.
+    await saveChain;
+    if (cancelled) return;
+    startSession(boundary, anchor);
   };
 
   function openContents(returnFocus = document.activeElement as HTMLElement | null): void {
@@ -1136,7 +1115,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         },
         el("span", { className: "reader-contents-order" }, String(entryIndex + 1).padStart(2, "0")),
         el("span", { className: "reader-contents-name" }, sectionTitle(section, index)),
-        el("span", { className: "reader-contents-progress" }, sectionProgressLabel(index, currentPosition))
+        el(
+          "span",
+          { className: "reader-contents-progress" },
+          sectionProgressLabel(index, progress.position)
+        )
       );
       if (isCurrent) currentButton = button;
       list.appendChild(button);
@@ -1483,6 +1466,11 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
             const currentStats = current?.getStats();
             const currentReplayIndex = replayHistoryIndex;
             const hasActivity = (currentStats?.charsTyped ?? 0) > 0;
+            const hasRouteLocalCursor = Boolean(
+              current &&
+              currentReplayIndex === null &&
+              !positionsEqual(current.getPosition(), current.getLessonAnchor().start)
+            );
             select.disabled = true;
 
             const settingsUpdate = getAppState().updateSettings({ lessonLength });
@@ -1498,10 +1486,10 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
               });
               return;
             }
-            if ((hasActivity || restartHighWater) && current) {
+            if ((hasActivity || hasRouteLocalCursor) && current) {
               // The engine freezes the active lesson target. Preserve this
-              // scored run (or a restarted passage's durable high-water) and
-              // apply the new size at its natural handoff.
+              // scored run (or route-local cursor) and apply the new size at
+              // its natural handoff.
               select.disabled = false;
               showToast(`${lessonLength} chars from next lesson`);
               current.resume();
@@ -1533,7 +1521,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
                   anchor = makeLessonAnchor(runtimeBook, stopped.position, lessonLength);
                   lessonNavigation = { ...lessonNavigation, frontier: anchor };
                   frontierCursor = { ...stopped.position };
-                  queueLessonNavigationSave();
+                  queueCheckpoint(lessonNavigation);
                 }
                 startSession(stopped.position, anchor);
                 hintEl.textContent = ACTIVE_READER_HINT;
@@ -1769,7 +1757,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
         totalChars: computeTotalChars(runtimeBook.sections, {}),
       };
       const corpusSignature = lessonCorpusSignature(runtimeBook);
-      frontierCursor = { ...progress.position };
       const navigationIsUsable =
         storedNavigation?.bookId === bookId &&
         storedNavigation.corpusSignature === corpusSignature &&
@@ -1784,6 +1771,17 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       const canSeedNavigation = hasTypeableSection(runtimeBook) && !atBookEnd;
       if (navigationIsUsable && storedNavigation) {
         lessonNavigation = storedNavigation;
+        const boundary = storedNavigation.frontier.start;
+        const boundaryChars = charsAtPosition(runtimeBook, boundary);
+        if (
+          !positionsEqual(progress.position, boundary) ||
+          progress.charsCompleted !== boundaryChars
+        ) {
+          // Migrate legacy mid-lesson bookmarks to the finite lesson start.
+          // Stats stay intact; reloads now consistently restart the passage.
+          persistProgress(boundary, boundaryChars, undefined, false);
+          queueCheckpoint(storedNavigation);
+        }
       } else if (canSeedNavigation) {
         const target = getAppState().settings.lessonLength;
         lessonNavigation = {
@@ -1797,8 +1795,9 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
           ).map((anchor) => ({ anchor, outcome: "recovered" as const })),
           frontier: makeLessonAnchor(runtimeBook, progress.position, target),
         };
-        queueLessonNavigationSave();
+        queueCheckpoint(lessonNavigation);
       }
+      frontierCursor = { ...progress.position };
       buildReader();
       unsubscribeSettings = getAppState().subscribe((settings) => {
         if (cancelled) return;
@@ -1834,11 +1833,6 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
   return {
     unmount: () => {
       if (cancelled) return;
-      // Navigation writes are serialized immutable snapshots. Enqueue the
-      // final state before teardown so a last replay/frontier update cannot
-      // remain only in memory; the chain continues after this sync handle is
-      // released by the router.
-      queueLessonNavigationSave();
       cancelled = true;
       document.removeEventListener("keydown", onDocumentKeydown);
       if (chooser) closeChooser(false);
