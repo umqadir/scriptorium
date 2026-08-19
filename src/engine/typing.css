@@ -13,8 +13,8 @@
   font-size: var(--scr-font-size, 1.5rem);
   line-height: 1.6;
   color: var(--sub-color, #646669);
-  user-select: none;
-  -webkit-user-select: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .scr-viewport {
@@ -29,6 +29,8 @@
   width: 100%;
   max-width: 100%;
   margin: 0;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .scr-block {
@@ -99,6 +101,8 @@
 
 .scr-extras {
   display: inline;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* A source-block boundary is an explicit Enter target. It lives inside the
@@ -112,6 +116,8 @@
   color: var(--sub-color, #646669);
   opacity: 0.45;
   transition: color 0.06s ease-out;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .scr-boundary--correct {
@@ -132,6 +138,8 @@
   width: 0;
   height: 0;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Caret ------------------------------------------------------------------ */
@@ -147,6 +155,8 @@
   transform-origin: top left;
   animation: scr-caret-flash 1s infinite;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .scr-caret--smooth {
@@ -198,4 +208,6 @@
   caret-color: transparent;
   opacity: 0;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }

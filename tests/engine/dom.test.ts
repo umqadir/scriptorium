@@ -5,8 +5,11 @@ import { describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   buildDom,
+  canonicalTextContent,
   positionCaret,
   renderWindow,
+  selectedCanonicalText,
+  selectionIntersectsText,
 } from "../../src/engine/dom";
 import { makeSettings } from "./helpers";
 
@@ -214,6 +217,54 @@ describe("renderWindow", () => {
 
     expect(host.querySelector(".scr-line-tail")).toBeNull();
     expect(host.querySelector(".scr-word")?.textContent).toBe("Sing¶");
+  });
+
+  test("serializes a selected passage as canonical text without extras or pilcrows", () => {
+    const host = document.createElement("div");
+    renderWindow(
+      host,
+      [
+        {
+          sectionIndex: 0,
+          blockIndex: 0,
+          block: { kind: "paragraph", text: "one two" },
+          hasBoundary: true,
+        },
+        {
+          sectionIndex: 0,
+          blockIndex: 1,
+          block: { kind: "paragraph", text: "three" },
+        },
+      ],
+      () => "pending",
+      (_sectionIndex, blockIndex, wordStart) =>
+        blockIndex === 0 && wordStart === 0 ? ["X"] : [],
+    );
+    document.body.appendChild(host);
+
+    const selection = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(host.querySelector(".scr-text") ?? host);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    expect(selectionIntersectsText(host, selection)).toBe(true);
+    expect(selectedCanonicalText(host, selection)).toBe("one two\nthree");
+    expect(canonicalTextContent(host)).toBe("one two\nthree");
+    expect(host.textContent).toContain("X");
+    expect(host.textContent).toContain("¶");
+    expect(typingCss).toMatch(
+      /\.scr-text\s*\{[^}]*user-select:\s*text;[^}]*-webkit-user-select:\s*text;/s,
+    );
+    expect(typingCss).toMatch(
+      /\.scr-root\s*\{[^}]*user-select:\s*text;[^}]*-webkit-user-select:\s*text;/s,
+    );
+    expect(typingCss).toMatch(
+      /\.scr-boundary\s*\{[^}]*user-select:\s*none;[^}]*-webkit-user-select:\s*none;/s,
+    );
+
+    selection.removeAllRanges();
+    host.remove();
   });
 
   test("renders a partial lesson block with canonical indices, extras keys, and pilcrow", () => {

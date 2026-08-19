@@ -121,6 +121,82 @@ export type WindowRefs = {
   blockElIndex: Map<string, HTMLDivElement>;
 };
 
+/** Whether a non-collapsed browser selection touches the rendered passage. */
+export function selectionIntersectsText(
+  textEl: HTMLElement,
+  selection: Selection | null,
+): boolean {
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return false;
+  }
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    try {
+      if (selection.getRangeAt(index).intersectsNode(textEl)) return true;
+    } catch {
+      // A selection can briefly retain a detached range during lesson swaps.
+    }
+  }
+  return false;
+}
+
+/**
+ * Serialize only selected canonical book characters. Visual error extras,
+ * caret elements, and the synthetic pilcrow never leak into copied text.
+ * Source blocks are separated with a real newline.
+ */
+export function selectedCanonicalText(
+  textEl: HTMLElement,
+  selection: Selection | null,
+): string | null {
+  if (!selectionIntersectsText(textEl, selection) || !selection) return null;
+
+  const selected: Array<{ block: Element; text: string }> = [];
+  for (const span of textEl.querySelectorAll<HTMLElement>(
+    ".scr-char:not(.scr-char--extra)",
+  )) {
+    let intersects = false;
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      try {
+        if (selection.getRangeAt(index).intersectsNode(span)) {
+          intersects = true;
+          break;
+        }
+      } catch {
+        // Ignore detached ranges while the finite lesson is being replaced.
+      }
+    }
+    if (!intersects) continue;
+    const block = span.closest(".scr-block");
+    if (block) selected.push({ block, text: span.textContent ?? "" });
+  }
+  if (selected.length === 0) return null;
+
+  let result = "";
+  let previousBlock: Element | null = null;
+  for (const item of selected) {
+    if (previousBlock && item.block !== previousBlock) result += "\n";
+    result += item.text;
+    previousBlock = item.block;
+  }
+  return result;
+}
+
+/** Serialize the complete mounted passage as source text. */
+export function canonicalTextContent(textEl: HTMLElement): string {
+  let result = "";
+  let previousBlock: Element | null = null;
+  for (const span of textEl.querySelectorAll<HTMLElement>(
+    ".scr-char:not(.scr-char--extra)",
+  )) {
+    const block = span.closest(".scr-block");
+    if (!block) continue;
+    if (previousBlock && block !== previousBlock) result += "\n";
+    result += span.textContent ?? "";
+    previousBlock = block;
+  }
+  return result;
+}
+
 /** Rebuild the finite lesson fragment, never as a per-keystroke update. */
 export function renderWindow(
   textEl: HTMLElement,

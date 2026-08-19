@@ -48,6 +48,9 @@ import {
   applyCaretStyle,
   applySmoothCaret,
   renderWindow,
+  canonicalTextContent,
+  selectedCanonicalText,
+  selectionIntersectsText,
   setCharClass,
   setBoundaryClass,
   renderExtras,
@@ -140,6 +143,7 @@ export class TypingSession {
   private progressTimer: ReturnType<typeof setTimeout> | null = null;
   private progressDirty = false;
   private blurRefocusTimer: ReturnType<typeof setTimeout> | null = null;
+  private clickRefocusTimer: ReturnType<typeof setTimeout> | null = null;
 
   private started = false;
   private destroyed = false;
@@ -149,6 +153,7 @@ export class TypingSession {
   private suppressBeforeInput = false;
   private suppressInput = false;
   private inputSuppressionGeneration = 0;
+  private selectingText = false;
 
   private onKeyDown: ((e: KeyboardEvent) => void) | null = null;
   private onBeforeInput: ((e: InputEvent) => void) | null = null;
@@ -156,9 +161,12 @@ export class TypingSession {
   private onCompositionStart: (() => void) | null = null;
   private onCompositionEnd: ((e: CompositionEvent) => void) | null = null;
   private onPaste: ((e: ClipboardEvent) => void) | null = null;
+  private onCopy: ((e: ClipboardEvent) => void) | null = null;
   private onFocus: (() => void) | null = null;
   private onBlur: ((e: FocusEvent) => void) | null = null;
   private onContainerClick: ((e: MouseEvent) => void) | null = null;
+  private onTextPointerDown: (() => void) | null = null;
+  private onDocumentPointerUp: (() => void) | null = null;
 
   constructor(opts: TypingSessionOptions) {
     this.opts = opts;
@@ -211,6 +219,11 @@ export class TypingSession {
     this.focusInput();
   }
 
+  /** Canonical source text for the currently mounted finite passage. */
+  getLessonText(): string {
+    return this.dom ? canonicalTextContent(this.dom.textEl) : "";
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -223,6 +236,10 @@ export class TypingSession {
     if (this.blurRefocusTimer !== null) {
       clearTimeout(this.blurRefocusTimer);
       this.blurRefocusTimer = null;
+    }
+    if (this.clickRefocusTimer !== null) {
+      clearTimeout(this.clickRefocusTimer);
+      this.clickRefocusTimer = null;
     }
     this.clock.destroy();
 
@@ -241,8 +258,18 @@ export class TypingSession {
         input.removeEventListener("compositionend", this.onCompositionEnd);
       }
       if (this.onPaste) input.removeEventListener("paste", this.onPaste);
+      if (this.onCopy) dom.rootEl.ownerDocument.removeEventListener("copy", this.onCopy);
       if (this.onFocus) input.removeEventListener("focus", this.onFocus);
       if (this.onBlur) input.removeEventListener("blur", this.onBlur);
+      if (this.onTextPointerDown) {
+        dom.textEl.removeEventListener("pointerdown", this.onTextPointerDown);
+      }
+      if (this.onDocumentPointerUp) {
+        dom.rootEl.ownerDocument.removeEventListener(
+          "pointerup",
+          this.onDocumentPointerUp,
+        );
+      }
       if (dom.rootEl.parentNode) dom.rootEl.parentNode.removeChild(dom.rootEl);
     }
     if (this.onContainerClick) {
@@ -255,9 +282,13 @@ export class TypingSession {
     this.onCompositionStart = null;
     this.onCompositionEnd = null;
     this.onPaste = null;
+    this.onCopy = null;
     this.onFocus = null;
     this.onBlur = null;
     this.onContainerClick = null;
+    this.onTextPointerDown = null;
+    this.onDocumentPointerUp = null;
+    this.selectingText = false;
     this.boundaryErrors.clear();
     this.boundaryIndex.clear();
     this.dom = null;
@@ -571,6 +602,12 @@ export class TypingSession {
       e.preventDefault();
       this.clearHiddenInput();
     };
+    this.onCopy = (e: ClipboardEvent) => {
+      const text = selectedCanonicalText(dom.textEl, dom.rootEl.ownerDocument.getSelection());
+      if (text === null || !e.clipboardData) return;
+      e.preventDefault();
+      e.clipboardData.setData("text/plain", text);
+    };
     this.onFocus = () => {
       if (this.destroyed || this.pausedExplicitly || this.finished) {
         this.hideCaret();
@@ -597,12 +634,40 @@ export class TypingSession {
         ) {
           return;
         }
+        if (
+          this.selectingText ||
+          selectionIntersectsText(dom.textEl, dom.rootEl.ownerDocument.getSelection())
+        ) {
+          return;
+        }
         this.focusInput();
       }, 0);
     };
     this.onContainerClick = (event: MouseEvent) => {
       if (event.target instanceof Element && this.isInteractiveElement(event.target)) return;
-      this.focusInput();
+      if (this.clickRefocusTimer !== null) clearTimeout(this.clickRefocusTimer);
+      // Selection is a click/drag default action and may not exist until the
+      // click handler returns. Check on the next task before restoring typing
+      // focus, otherwise a completed selection is immediately collapsed.
+      this.clickRefocusTimer = setTimeout(() => {
+        this.clickRefocusTimer = null;
+        if (
+          this.destroyed ||
+          selectionIntersectsText(dom.textEl, dom.rootEl.ownerDocument.getSelection())
+        ) {
+          return;
+        }
+        this.focusInput();
+      }, 0);
+    };
+    this.onTextPointerDown = () => {
+      // Mousedown blurs the hidden typing input before the browser has built
+      // its selection. Suppress the scheduled auto-refocus for that interval
+      // or it collapses the drag selection before mouseup.
+      this.selectingText = true;
+    };
+    this.onDocumentPointerUp = () => {
+      this.selectingText = false;
     };
 
     input.addEventListener("keydown", this.onKeyDown);
@@ -611,8 +676,14 @@ export class TypingSession {
     input.addEventListener("compositionstart", this.onCompositionStart);
     input.addEventListener("compositionend", this.onCompositionEnd);
     input.addEventListener("paste", this.onPaste);
+    dom.rootEl.ownerDocument.addEventListener("copy", this.onCopy);
     input.addEventListener("focus", this.onFocus);
     input.addEventListener("blur", this.onBlur);
+    dom.textEl.addEventListener("pointerdown", this.onTextPointerDown);
+    dom.rootEl.ownerDocument.addEventListener(
+      "pointerup",
+      this.onDocumentPointerUp,
+    );
     this.container.addEventListener("click", this.onContainerClick);
   }
 

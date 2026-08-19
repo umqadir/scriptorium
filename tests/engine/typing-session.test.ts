@@ -84,6 +84,48 @@ function pressModifiedBackspace(
 }
 
 describe("basic character states", () => {
+  test("copies canonical passage text in mixed progress states", () => {
+    const book = makeBook([
+      {
+        id: "ch1",
+        blocks: [{ text: "one two" }, { text: "three" }],
+      },
+    ]);
+    const session = new TypingSession({
+      book,
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+
+    typeText(input, "onx"); // correct, correct, incorrect
+    pressChar(input, "X"); // visible extra at the pending space
+
+    const selection = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(container.querySelector<HTMLElement>(".scr-text")!);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const setData = vi.fn();
+    const copyEvent = new Event("copy", {
+      bubbles: true,
+      cancelable: true,
+    }) as ClipboardEvent;
+    Object.defineProperty(copyEvent, "clipboardData", {
+      value: { setData },
+    });
+    input.dispatchEvent(copyEvent);
+
+    expect(copyEvent.defaultPrevented).toBe(true);
+    expect(setData).toHaveBeenCalledOnce();
+    expect(setData).toHaveBeenCalledWith("text/plain", "one two\nthree");
+
+    selection.removeAllRanges();
+    session.destroy();
+  });
+
   test("correct input produces 100% accuracy and advances position", () => {
     const book = makeBook([{ id: "ch1", blocks: [{ text: "hello world" }] }]);
     const session = new TypingSession({ book, container, settings: makeSettings() });
@@ -1754,6 +1796,42 @@ describe("lifecycle and traversal", () => {
     vi.runOnlyPendingTimers();
     expect(document.activeElement).toBe(input);
     expect(caret.style.opacity).toBe("");
+    session.destroy();
+  });
+
+  test("drag selection is not collapsed by automatic typing refocus", () => {
+    vi.useFakeTimers();
+    const session = new TypingSession({
+      book: makeBook([{ id: "ch1", blocks: [{ text: "select this text" }] }]),
+      container,
+      settings: makeSettings(),
+    });
+    session.start();
+    const input = getHiddenInput(container);
+    const textEl = container.querySelector<HTMLElement>(".scr-text")!;
+    const focus = vi.spyOn(input, "focus");
+
+    textEl.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("blur", { relatedTarget: document.body }));
+    vi.runOnlyPendingTimers();
+    expect(focus).not.toHaveBeenCalled();
+
+    const selection = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(textEl);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    container.click();
+    vi.runOnlyPendingTimers();
+    expect(focus).not.toHaveBeenCalled();
+
+    selection.removeAllRanges();
+    container.click();
+    vi.runOnlyPendingTimers();
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+
+    focus.mockRestore();
     session.destroy();
   });
 

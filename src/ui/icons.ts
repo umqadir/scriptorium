@@ -37,6 +37,9 @@ export const icons = {
   refresh: svg(
     `<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>`
   ),
+  copy: svg(
+    `<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/>`
+  ),
   pause: svg(`<path d="M8 5v14"/><path d="M16 5v14"/>`),
   link: svg(
     `<path d="M9 15l6-6"/><path d="M8 8l1.5-1.5a4 4 0 0 1 5.66 5.66L14 13"/><path d="M16 16l-1.5 1.5a4 4 0 0 1-5.66-5.66L10 11"/>`

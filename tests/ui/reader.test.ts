@@ -319,7 +319,12 @@ describe("mountReader", () => {
       [...workspace.querySelectorAll<HTMLButtonElement>(".reader-lesson-nav button")].map(
         (button) => button.getAttribute("aria-label")
       )
-    ).toEqual(["Previous passage", "Restart passage", "Skip passage"]);
+    ).toEqual([
+      "Previous passage",
+      "Restart passage",
+      "Copy passage",
+      "Skip passage",
+    ]);
     expect(shell.querySelector('[role="progressbar"]')).toBeNull();
     expect(shell.querySelector(".reader-progress-bar")).toBeNull();
 
@@ -381,6 +386,44 @@ describe("mountReader", () => {
     expect(shell.querySelector(".reader-live-stats")?.closest(".reader-chrome")).toBeNull();
     style.remove();
     handle.unmount?.();
+  });
+
+  test("copies canonical passage text at any typing state", async () => {
+    const parsed = book("one two");
+    parsed.sections[0]!.blocks = [
+      { kind: "paragraph", text: "one two" },
+      { kind: "paragraph", text: "three" },
+    ];
+    parsed.sections[0]!.charCount = 12;
+    storage.getBook.mockResolvedValue(stored(parsed));
+    storage.getProgress.mockResolvedValue(createInitialProgress("book-1", 12));
+    const writeText = vi.fn(async (_text: string) => undefined);
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const host = document.createElement("main");
+    document.body.appendChild(host);
+
+    const handle = mountReader(host, "book-1");
+    await vi.waitFor(() => expect(host.querySelector(".scr-hidden-input")).not.toBeNull());
+    const input = host.querySelector<HTMLInputElement>(".scr-hidden-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "o", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "X", bubbles: true }));
+    host.querySelector<HTMLButtonElement>('[aria-label="Copy passage"]')!.click();
+
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("one two\nthree"));
+    expect(writeText).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
+
+    handle.unmount?.();
+    host.remove();
+    if (clipboardDescriptor) {
+      Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
+    } else {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
   });
 
   test("persists completion and accumulates lifetime exactly once across completion and unmount", async () => {

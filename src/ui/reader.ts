@@ -62,6 +62,24 @@ const EMPTY_TOTALS: SessionTotals = {
 };
 
 const ACTIVE_READER_HINT = "enter at ¶ · esc to pause";
+
+async function copyText(text: string): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand?.("copy") ?? false;
+    textarea.remove();
+    if (!copied) throw new Error("Clipboard write failed");
+  }
+}
 const READER_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -1559,6 +1577,26 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       on: { click: restartPassage },
       html: icons.refresh,
     }) as HTMLButtonElement;
+    const copyPassageButtonEl = el("button", {
+      className: "icon-button",
+      attrs: {
+        type: "button",
+        "aria-label": "Copy passage",
+        title: "Copy passage text",
+      },
+      on: {
+        click: () => {
+          const current = session;
+          const text = current?.getLessonText() ?? "";
+          if (!current || !text) return;
+          void copyText(text)
+            .then(() => showToast("Passage copied", "success"))
+            .catch(() => showToast("Couldn't copy the passage.", "error"))
+            .finally(() => current.resume());
+        },
+      },
+      html: icons.copy,
+    }) as HTMLButtonElement;
     forwardPassageButtonEl = el("button", {
       className: "icon-button",
       attrs: {
@@ -1574,6 +1612,7 @@ export function mountReader(container: HTMLElement, bookId: string): ScreenHandl
       { className: "reader-lesson-nav", attrs: { role: "group", "aria-label": "Passage controls" } },
       previousPassageButtonEl,
       restartPassageButtonEl,
+      copyPassageButtonEl,
       forwardPassageButtonEl
     );
     updateLessonNavigationControls();
